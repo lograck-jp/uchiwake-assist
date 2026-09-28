@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+           xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+           xsi:type="TaskPaneApp">
+  <Id>6bb8d930-ad76-4a17-a2e0-931947f1a444</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>伊藤（札幌支店）</ProviderName>
+  <DefaultLocale>ja-JP</DefaultLocale>
+  <DisplayName DefaultValue="内訳アシスト"/>
+  <Description DefaultValue="保温工事の見積内訳を、品目・施工箇所・仕様・サイズを選んで内訳シートへ登録します。"/>
+  <IconUrl DefaultValue="https://lograck-jp.github.io/uchiwake-assist/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://lograck-jp.github.io/uchiwake-assist/assets/icon-64.png"/>
+  <SupportUrl DefaultValue="https://lograck-jp.github.io/uchiwake-assist/"/>
+  <AppDomains>
+    <AppDomain>https://lograck-jp.github.io</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Workbook"/>
+  </Hosts>
+  <Requirements>
+    <Sets DefaultMinVersion="1.1">
+      <Set Name="ExcelApi" MinVersion="1.7"/>
+    </Sets>
+  </Requirements>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://lograck-jp.github.io/uchiwake-assist/taskpane.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Workbook">
+        <DesktopFormFactor>
+          <GetStarted>
+            <Title resid="GetStarted.Title"/>
+            <Description resid="GetStarted.Description"/>
+            <LearnMoreUrl resid="GetStarted.LearnMoreUrl"/>
+          </GetStarted>
+          <FunctionFile resid="Commands.Url"/>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="UchiwakeAssist.Group">
+                <Label resid="Group.Label"/>
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16x16"/>
+                  <bt:Image size="32" resid="Icon.32x32"/>
+                  <bt:Image size="80" resid="Icon.80x80"/>
+                </Icon>
+                <Control xsi:type="Button" id="UchiwakeAssist.OpenButton">
+                  <Label resid="Button.Label"/>
+                  <Supertip>
+                    <Title resid="Button.Label"/>
+                    <Description resid="Button.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16x16"/>
+                    <bt:Image size="32" resid="Icon.32x32"/>
+                    <bt:Image size="80" resid="Icon.80x80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16x16" DefaultValue="https://lograck-jp.github.io/uchiwake-assist/assets/icon-16.png"/>
+        <bt:Image id="Icon.32x32" DefaultValue="https://lograck-jp.github.io/uchiwake-assist/assets/icon-32.png"/>
+        <bt:Image id="Icon.80x80" DefaultValue="https://lograck-jp.github.io/uchiwake-assist/assets/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://lograck-jp.github.io/uchiwake-assist/"/>
+        <bt:Url id="Commands.Url" DefaultValue="https://lograck-jp.github.io/uchiwake-assist/commands.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://lograck-jp.github.io/uchiwake-assist/taskpane.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="GetStarted.Title" DefaultValue="内訳アシストを使う準備ができました"/>
+        <bt:String id="Group.Label" DefaultValue="内訳アシスト"/>
+        <bt:String id="Button.Label" DefaultValue="内訳アシスト"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="GetStarted.Description" DefaultValue="ホームタブの「内訳アシスト」ボタンでパネルを開き、最初に設定マスタを読み込んでください。"/>
+        <bt:String id="Button.Tooltip" DefaultValue="見積内訳の入力パネルを開きます。"/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>
