@@ -79,7 +79,10 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .in:focus { outline: none; border-color: var(--acc); box-shadow: 0 0 0 3px rgba(245, 165, 36, .18); }
 .in.num { text-align: right; font-family: Consolas, 'Meiryo UI', monospace; }
 .in.num.c { text-align: center; }
-.in.bad { border-color: var(--err); }
+/* 単価未登録：フォーカス枠と見間違えないよう点線・グレー。注意はキャプション側の色で示す */
+.in.bad { border-style: dashed; border-color: var(--line2); background: transparent; }
+.in.bad::placeholder { color: var(--faint); }
+.in.bad:focus { border-style: solid; border-color: var(--acc); background: #0F1113; }
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; }
 .tile { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 4px 10px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--sub); text-align: left; }
 .tile .ic { width: 20px; height: 20px; color: var(--muted); }

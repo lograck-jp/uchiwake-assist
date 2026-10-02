@@ -5,7 +5,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '1.0.0';
+  var VERSION = '1.0.1';
   var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1';
 
   var st = {
@@ -472,6 +472,7 @@
     var main = $('#main'), scroll = main ? main.scrollTop : 0;
     app.innerHTML = view();
     var m2 = $('#main'); if (m2) m2.scrollTop = scroll;
+    if (st.ui.noRestore) { focus = null; st.ui.noRestore = false; }
     if (focus) {
       var el = document.querySelector('[data-f="' + focus.f + '"]' + (focus.k ? '[data-k="' + CSS.escape(focus.k) + '"]' : ''));
       if (el) { el.focus(); try { if (focus.s != null) el.setSelectionRange(focus.s, focus.e); } catch (e) { /* noop */ } }
@@ -596,11 +597,11 @@
           var manual = en.i !== undefined, price = manual ? (en.i === '' ? null : U.num(en.i)) : lp.p, g = U.num(en.g);
           var cap = manual ? ['手入力', 'c-info'] : lp.p != null ? (lp.ref ? ['参考：' + lp.ref + 'の単価', 'c-warn'] : [(lp.memo ? '手入力の記録 ' : '履歴 ') + lp.date, 'c-mute']) : ['単価の記録なし', 'c-err'];
           h.push('<div class="qr"><span class="sz">' + esc(k.series === 'A' ? z.n + 'A' : 'φ' + z.n) + '</span>' +
-            '<input class="in num c" data-f="ent.f" data-k="' + key + '" value="' + esc(fShown) + '" aria-label="' + key + 'の保温厚">' +
+            '<input class="in num c" tabindex="-1" data-f="ent.f" data-k="' + key + '" value="' + esc(fShown) + '" aria-label="' + key + 'の保温厚">' +
             '<input class="in num" data-f="ent.g" data-k="' + key + '" value="' + esc(en.g) + '" placeholder="数量" aria-label="' + key + 'の数量">' +
-            '<span class="pc"><input class="in num' + (price == null ? ' bad' : '') + '" data-f="ent.i" data-k="' + key + '" value="' + esc(manual ? en.i : (lp.p != null ? lp.p : '')) + '" placeholder="未登録" aria-label="' + key + 'の単価"><small class="' + cap[1] + '">' + esc(cap[0]) + '</small></span>' +
+            '<span class="pc"><input class="in num' + (price == null ? ' bad' : '') + '" tabindex="-1" data-f="ent.i" data-k="' + key + '" value="' + esc(manual ? en.i : (lp.p != null ? lp.p : '')) + '" placeholder="未登録" aria-label="' + key + 'の単価"><small class="' + cap[1] + '">' + esc(cap[0]) + '</small></span>' +
             '<span class="amt">' + (price == null || !(g > 0) ? '—' : '¥' + U.yen(g * price)) + '</span>' +
-            '<button type="button" class="x" data-act="size" data-v="' + key + '" aria-label="' + key + 'を外す">×</button></div>');
+            '<button type="button" class="x" tabindex="-1" data-act="size" data-v="' + key + '" aria-label="' + key + 'を外す">×</button></div>');
         });
         h.push('</div>');
       } else h.push('<div class="empty">サイズを押して追加（複数まとめて選べます）</div>');
@@ -612,9 +613,9 @@
       var g2 = s.rq !== '' ? U.num(s.rq) : dimsTotal();
       var cap2 = man ? ['手入力', 'c-info'] : lp2.p != null ? [(lp2.memo ? '手入力の記録 ' : '履歴 ') + lp2.date, 'c-mute'] : ['単価の記録なし', 'c-err'];
       h.push('<div class="qtab"><div class="qh q4"><span>E列</span><span>保温厚</span><span>数量(㎡)</span><span>単価</span><span>金額</span></div>' +
-        '<div class="qr q4"><span class="sz">' + esc(eVal) + '</span><input class="in num c" data-f="rf" value="' + esc(rf) + '" aria-label="保温厚">' +
+        '<div class="qr q4"><span class="sz">' + esc(eVal) + '</span><input class="in num c" tabindex="-1" data-f="rf" value="' + esc(rf) + '" aria-label="保温厚">' +
         '<input class="in num" data-f="rq" value="' + esc(s.rq) + '" placeholder="' + (dimsTotal() > 0 ? '寸法から ' + dimsTotal() : '数量') + '" aria-label="数量（平方メートル）">' +
-        '<span class="pc"><input class="in num' + (pr == null ? ' bad' : '') + '" data-f="ri" value="' + esc(man ? s.ri : (lp2.p != null ? lp2.p : '')) + '" placeholder="未登録" aria-label="単価"><small class="' + cap2[1] + '">' + esc(cap2[0]) + '</small></span>' +
+        '<span class="pc"><input class="in num' + (pr == null ? ' bad' : '') + '" tabindex="-1" data-f="ri" value="' + esc(man ? s.ri : (lp2.p != null ? lp2.p : '')) + '" placeholder="未登録" aria-label="単価"><small class="' + cap2[1] + '">' + esc(cap2[0]) + '</small></span>' +
         '<span class="amt">' + (pr == null || !(g2 > 0) ? '—' : '¥' + U.yen(g2 * pr)) + '</span></div></div>');
       h.push('<div class="dims"><div class="lbl">寸法から計算（数量が空欄のとき使用）　2×(W＋H)×長さ</div>' + s.dims.map(function (dd, i) {
         var w = U.num(dd.w), hh = U.num(dd.h), l = U.num(dd.l), a = (w > 0 && hh > 0 && l > 0) ? 2 * (w + hh) / 1000 * l : 0;
@@ -698,6 +699,7 @@
           var e = Object.assign({}, s.ent);
           if (e[v]) delete e[v]; else e[v] = { g: '' };
           s.ent = e;
+          st.ui.noRestore = true;
           if (e[v]) setTimeout(function () { var i = document.querySelector('[data-f="ent.g"][data-k="' + v + '"]'); if (i) i.focus(); }, 0);
           break;
         }
