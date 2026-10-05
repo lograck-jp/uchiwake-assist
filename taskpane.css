@@ -221,3 +221,27 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .addspec .ghost, .sopt.edit .ghost { flex: 1; }
 .ghost.acc { border-color: var(--acc); color: var(--acc); }
 .link.sm { font-size: 10.5px; align-self: flex-start; }
+
+/* ---- v1.2.1：仕様の候補を「保温材｜外装・仕上げ」の2列で縦にそろえる ---- */
+.sv { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sv1 { font-size: 13px; color: var(--sub); word-break: break-all; }
+.sv1 b { font-size: 14.5px; color: #fff; margin-left: 1px; }
+.sv2 { font-size: 12.5px; color: var(--text); word-break: break-all; }
+.scolh { display: grid; grid-template-columns: 46% 1fr; gap: 10px; padding: 2px 11px 0; color: var(--faint); font-size: 10px; letter-spacing: .08em; }
+.speclist .slgt { margin-top: 8px; padding: 0 2px 3px; border-bottom: 1px solid #2C3137; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
+.srow { display: flex; align-items: stretch; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.srow:hover { border-color: var(--acc); }
+.srow-b { flex: 1; min-width: 0; display: grid; grid-template-columns: 46% 1fr; gap: 10px; align-items: center; padding: 9px 10px; border: 0; background: transparent; text-align: left; color: var(--text); font-size: 12.5px; line-height: 1.4; }
+.srow-b .c1 { color: var(--sub); overflow-wrap: anywhere; }
+.srow-b .c1 b { color: #fff; font-size: 13.5px; font-weight: 700; }
+.srow-b .c2 { color: var(--text); overflow-wrap: anywhere; }
+.srow-b .pin { font-style: normal; color: var(--acc); margin-right: 3px; }
+.srow.on { background: var(--acc); border-color: var(--acc); }
+.srow.on .srow-b .c1, .srow.on .srow-b .c1 b, .srow.on .srow-b .c2, .srow.on .srow-b .pin { color: var(--acc-ink); }
+.srow.off { opacity: .55; }
+.srow-a { flex-shrink: 0; width: 88px; display: flex; align-items: center; justify-content: center; gap: 2px; padding: 0 2px; border-left: 1px solid #2C3137; }
+.srow.on .srow-a { border-left-color: rgba(26, 19, 5, .25); }
+.srow.on .ic-b { color: var(--acc-ink); }
+.ic-n { width: 26px; text-align: center; color: var(--faint); }
+.slft { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; }
+.slft .link { margin-left: 0; }

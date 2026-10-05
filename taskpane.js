@@ -5,7 +5,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '1.2.0';
+  var VERSION = '1.2.1';
   var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
 
@@ -456,9 +456,13 @@
   }
   function locate() {
     var p = currentPlan();
-    if (!p || !p.ok || !p.anchorRow) return;
-    var r = Math.max(1, p.anchorRow - 1), jc = colsOf().j;
-    Excel.run(function (ctx) { ctx.workbook.worksheets.getItem(st.target).getRange('A' + r + ':' + jc + p.anchorRow).select(); return ctx.sync(); })
+    if (!p || !p.ok || !p.firstRow) return;
+    var jc = colsOf().j, a = p.firstRow, b = p.lastRow || p.firstRow;
+    Excel.run(function (ctx) { ctx.workbook.worksheets.getItem(st.target).getRange('A' + a + ':' + jc + b).select(); return ctx.sync(); })
+      .then(function () {
+        toast((a === b ? a + '行目' : a + '〜' + b + '行目') + 'に書き込みます' + (p.addCount ? '（今その位置にある行は下にずれます）' : '') + '。シートはまだ変わっていません。', 'info');
+        render();
+      })
       .catch(function (e) { toast(msg(e), 'err'); render(); });
   }
   function setAutoOpen(on) {
@@ -666,17 +670,17 @@
     var elb = s.item === 'pipe' ? '<div class="elb"><span>エルボ・チーズ 1式（任意）</span><input class="in num" data-f="elbow" value="' + esc(s.elbow) + '" placeholder="金額" aria-label="エルボ・チーズの金額"><span>円</span></div>' : '';
     return '<section class="st">' + stepHead('03', '品目', 'D列・E列', true) + '<div class="tiles">' + tiles + '</div>' + sub + elb + '</section>';
   }
-  // 仕様を「保温材（色分け）・貼り・仕上げ・目印」に分けて表示
-  var FAMC = { GW: 'gw', RW: 'rw', PF: 'pf', FP: 'fp', 'ゴム': 'rb' };
-  function specView(spec) {
-    if (!spec) return '<span class="sp"><b class="sp-mat">未選択</b></span>';
+  // 仕様を「保温材」と「外装・仕上げ」の2つの列に分けて、縦にそろえて見せる
+  function specCols(spec) {
     var p = UA.specParts(spec);
-    return '<span class="sp">' +
-      p.pre.map(function (x) { return '<i class="sp-pre">' + esc(x) + '</i>'; }).join('') +
-      (p.facing ? '<i class="sp-face">' + esc(p.facing.replace(/付$/, '')) + '</i>' : '') +
-      '<b class="sp-mat ' + (FAMC[p.fam] || 'no') + '">' + esc(p.mat) + '</b>' +
-      p.tags.map(function (t) { return '<i class="sp-tag' + (t === 'ヒーター' ? ' hot' : '') + '">' + esc(t) + '</i>'; }).join('') + '</span>' +
-      (p.rest.length ? '<span class="sp-rest">' + p.rest.map(function (x) { return '<em>＋</em>' + esc(x); }).join('') + '</span>' : '');
+    var c1 = p.tags.filter(function (t) { return t !== '2層' && t !== '遮音'; }).map(function (t) { return t + '＋'; }).join('') +
+      p.pre.map(function (t) { return t + '＋'; }).join('') + p.facing;
+    return { lead: c1, mat: p.mat, rest: p.rest.join(' ＋ ') || '（なし）' };
+  }
+  function specView(spec) {
+    if (!spec) return '<span class="sv"><b>未選択</b></span>';
+    var c = specCols(spec);
+    return '<span class="sv"><span class="sv1">' + esc(c.lead) + '<b>' + esc(c.mat) + '</b></span><span class="sv2">＋ ' + esc(c.rest) + '</span></span>';
   }
   // 積算資料の表が当たるか（代表のサイズで確認）
   var skHintCache = {};
@@ -710,17 +714,19 @@
     var badge = s.custom && s.spec === U.normSpec(s.custom) ? ['直接入力', 'b-warn'] : hit && hit.sheet ? [(s.specAuto ? 'AUTO ' : '') + 'この見積で使用中', 'b-info']
       : hit && hit.here ? [(s.specAuto ? 'AUTO ' : '') + s.place + 'の候補', 'b-info'] : hit ? ['全箇所の候補', 'b-mute'] : ['候補にない仕様', 'b-warn'];
     var nAll = 0; gs.forEach(function (g) { if (g.key !== 'hidden') nAll += g.items.length; });
-    var head = '<div class="speccard"><span class="spv" title="(' + esc(s.spec) + ')">' + specView(s.spec) + '<span class="sopt-meta"><span class="badge ' + badge[1] + '">' + esc(badge[0]) + '</span>' + skTag(s.spec) + '</span></span>' +
+    var head = '<div class="speccard"><span class="spv" title="(' + esc(s.spec) + ')">' + specView(s.spec) + '</span>' +
       '<button type="button" class="ghost" data-act="specToggle" aria-expanded="' + st.ui.specOpen + '">' + (st.ui.specOpen ? '閉じる' : '候補' + nAll + '件') + '</button></div>';
     var list = '';
     if (st.ui.specOpen) {
       var seg = ['', '民間', '官庁'].map(function (c) { return '<button type="button" class="seg' + (st.siteType === c ? ' on' : '') + '" data-act="siteType" data-v="' + c + '">' + (c || 'すべて') + '</button>'; }).join('');
       list = '<div class="speclist"><div class="slhd"><span title="この見積書を民間・官庁のどちらとして候補を出すか（この見積書に記憶）">この見積の区分</span><span class="segs">' + seg + '</span></div>';
+      list += '<div class="scolh"><span>保温材</span><span>外装・仕上げ</span></div>';
       gs.forEach(function (g) {
-        list += '<div class="slgt">' + esc(g.title) + '<small>' + g.items.length + '</small></div>';
+        list += '<div class="slgt">' + esc(g.title.replace(/（ほかの施工箇所）/, '（ほかの施工箇所）')) + '</div>';
         list += g.items.map(function (it) { var i = flat.push(Object.assign({ grp: g.key }, it)) - 1; return optView(it, i, g.key); }).join('');
       });
-      if (gs.hiddenCount) list += '<button type="button" class="link sm" data-act="showHidden">' + (st.ui.showHidden ? '非表示にした候補を隠す' : '非表示にした候補を表示（' + gs.hiddenCount + '件）') + '</button>';
+      list += '<div class="slft"><button type="button" class="link sm" data-act="specEditMode">' + (st.ui.specEditMode ? '編集を終わる' : '候補を編集（固定・直す・外す）') + '</button>' +
+        (gs.hiddenCount ? '<button type="button" class="link sm" data-act="showHidden">' + (st.ui.showHidden ? '外した候補を隠す' : '外した候補を表示（' + gs.hiddenCount + '件）') + '</button>' : '') + '</div>';
       var pl = s.place || '（全箇所）';
       list += '<div class="addspec"><div class="lbl">候補を追加（このパソコンに記憶。メニューから書き出して設定マスタへ移せます）</div>' +
         '<input class="in" data-f="specNew" value="' + esc(st.ui.newSpec) + '" placeholder="例）ALK付Gw筒＋亀甲金網16m/m（括弧なし）" aria-label="追加する仕様">' +
@@ -740,17 +746,18 @@
         '<select class="in" data-f="specEditCat"><option value="">民間・官庁とも</option><option value="民間"' + (ed.cat === '民間' ? ' selected' : '') + '>民間だけ</option><option value="官庁"' + (ed.cat === '官庁' ? ' selected' : '') + '>官庁だけ</option></select></div>' +
         '<div class="row"><button type="button" class="ghost" data-act="specCancel">取消</button><button type="button" class="ghost acc" data-act="specSave">保存</button></div></div>';
     }
-    var meta;
-    if (gk === 'sheet') meta = it.cur ? 'この塊で使用' : (it.place ? it.place : '施工箇所なし') + 'で使用' + (it.n > 1 ? '（' + it.n + 'か所）' : '');
-    else meta = (it.here ? s.place + 'で' : '全箇所 ') + it.n + '回' + (it.src === 'local' ? '・追加分' : '') + (it.cat ? '・' + it.cat : '');
-    var acts = '';
-    if (gk === 'hidden') acts = '<button type="button" class="ic-b" data-act="specUnhide" data-v="' + i + '" title="候補に戻す">戻す</button>';
-    else if (gk !== 'sheet') acts = '<button type="button" class="ic-b' + (it.pin ? ' on' : '') + '" data-act="specPin" data-v="' + i + '" title="' + (it.pin ? '固定をやめる' : 'いちばん上に固定') + '">' + (it.pin ? '★' : '☆') + '</button>' +
-      '<button type="button" class="ic-b" data-act="specEdit" data-v="' + i + '" title="編集">✎</button>' +
-      '<button type="button" class="ic-b" data-act="specHide" data-v="' + i + '" title="' + (it.src === 'local' ? '削除' : '候補から外す（設定マスタは変わりません）') + '">×</button>';
-    return '<div class="sopt' + (on ? ' on' : '') + (gk === 'hidden' ? ' off' : '') + '"><button type="button" class="sopt-main" data-act="specPick" data-v="' + i + '" title="(' + esc(it.spec) + ')"' + (gk === 'hidden' ? ' disabled' : '') + '>' +
-      '<span class="sopt-body">' + specView(it.spec) + '</span><span class="sopt-meta">' + esc(meta) + skTag(it.spec, gk === 'sheet' && it.place ? it.place : '') + '</span></button>' +
-      (acts ? '<span class="sopt-acts">' + acts + '</span>' : '') + '</div>';
+    var c = specCols(it.spec), acts = '';
+    if (st.ui.specEditMode || gk === 'hidden') {
+      if (gk === 'hidden') acts = '<button type="button" class="ic-b" data-act="specUnhide" data-v="' + i + '" title="候補に戻す">戻す</button>';
+      else if (gk !== 'sheet') acts = '<button type="button" class="ic-b' + (it.pin ? ' on' : '') + '" data-act="specPin" data-v="' + i + '" title="' + (it.pin ? '固定をやめる' : 'いちばん上に固定') + '">' + (it.pin ? '★' : '☆') + '</button>' +
+        '<button type="button" class="ic-b" data-act="specEdit" data-v="' + i + '" title="直す">✎</button>' +
+        '<button type="button" class="ic-b" data-act="specHide" data-v="' + i + '" title="' + (it.src === 'local' ? '削除' : '候補から外す（設定マスタは変わりません）') + '">×</button>';
+      else acts = '<span class="ic-n" title="この見積書で使っている仕様は、ここでは直せません">—</span>';
+    }
+    return '<div class="srow' + (on ? ' on' : '') + (gk === 'hidden' ? ' off' : '') + '">' +
+      '<button type="button" class="srow-b" data-act="specPick" data-v="' + i + '" title="(' + esc(it.spec) + ')"' + (gk === 'hidden' ? ' disabled' : '') + '>' +
+      '<span class="c1">' + (it.pin ? '<i class="pin">★</i>' : '') + esc(c.lead) + '<b>' + esc(c.mat) + '</b></span><span class="c2">' + esc(c.rest) + '</span></button>' +
+      (acts ? '<span class="srow-a">' + acts + '</span>' : '') + '</div>';
   }
   function saveSpecLocal() { if (!save(K_SPECS, st.specLocal)) toast('候補の変更をこのパソコンに記憶できませんでした', 'warn'); }
   function specKindOf() { return UA.KIND_OF_ITEM[st.sel.item] || st.sel.item; }
@@ -892,6 +899,7 @@
         }
         case 'specUnhide': { var ou = st.ui.specIdx[+v]; if (ou && ou.key) { delete st.specLocal.hide[ou.key]; saveSpecLocal(); } break; }
         case 'showHidden': st.ui.showHidden = !st.ui.showHidden; break;
+        case 'specEditMode': st.ui.specEditMode = !st.ui.specEditMode; st.ui.specEdit = null; break;
         case 'specEdit': { var oe = st.ui.specIdx[+v]; if (oe) st.ui.specEdit = { i: +v, spec: oe.spec, place: oe.place, cat: oe.cat || '', src: oe.src, id: oe.id, key: oe.key, kind: oe.kind }; break; }
         case 'specCancel': st.ui.specEdit = null; break;
         case 'specSave': {
