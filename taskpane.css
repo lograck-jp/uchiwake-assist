@@ -169,3 +169,4 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .toast.err { background: #3A2420; }
 .toast button { height: 30px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--line2); background: transparent; }
 .toast .x { border: 0; width: 26px; padding: 0; }
+.toast.info { background: var(--info-bg); }

@@ -5,11 +5,12 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '1.0.1';
-  var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1';
+  var VERSION = '1.1.0';
+  var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1', K_SK = 'uchiwake-assist.sekisan.v1';
+  var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
 
   var st = {
-    master: null, masterInfo: null, AL: {}, sheets: [], target: '', model: null, headerOK: false, modelErr: '',
+    master: null, masterInfo: null, sk: null, skInfo: null, AL: {}, sheets: [], target: '', model: null, headerOK: false, modelErr: '',
     sel: freshSel(), ui: { specOpen: false, menu: false, busy: false, toast: null, composing: false },
     undo: null, memo: { idx: {}, list: [] }, autoOpen: false, api19: false, api17: false, onChanged: null
   };
@@ -37,8 +38,10 @@
     var raw = load(K_MASTER);
     if (raw && raw.master) { setMaster(raw.master, raw.info, false); }
     var memo = load(K_MEMO); if (memo && memo.idx) st.memo = memo;
+    var skRaw = load(K_SK); if (skRaw && skRaw.sk && skRaw.sk.tables) { st.sk = skRaw.sk; st.skInfo = skRaw.info; }
     bindEvents();
     $('#masterFile').addEventListener('change', onMasterFile);
+    $('#skFile').addEventListener('change', onSkFile);
     refreshSheets().then(render, function (e) { st.modelErr = msg(e); render(); });
     if (st.api17) {
       Excel.run(function (ctx) {
@@ -56,7 +59,7 @@
     st.masterInfo = info;
     st.AL = UA.buildAliases(st.master);
     if (persist) {
-      var copy = Object.assign({}, m); delete copy.priceIdx; delete copy.specCount; delete copy.thickIdx; delete copy.kindById;
+      var copy = Object.assign({}, m); delete copy.priceIdx; delete copy.specCount; delete copy.thickIdx; delete copy.kindById; delete copy.skRules; delete copy.skAdj;
       if (!save(K_MASTER, { master: copy, info: info })) toast('マスタをこのパソコンに記憶できませんでした（容量不足の可能性）。表示中は使えます。', 'warn');
     }
     normalizeSel();
@@ -80,6 +83,58 @@
       } catch (err) { toast('読み込みに失敗しました：' + msg(err), 'err'); render(); }
     };
     reader.readAsArrayBuffer(f);
+  }
+
+  /* ---------- 保温積算資料（単価表） ---------- */
+  function onSkFile(ev) {
+    var f = ev.target.files && ev.target.files[0];
+    ev.target.value = '';
+    if (!f) return;
+    toast('保温積算資料を読み込んでいます…', 'info'); render();
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      setTimeout(function () {
+        try {
+          var wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', bookFiles: true });
+          var sk = UA.parseSekisan(wb, XLSX);
+          if (!sk.n) { toast('単価表（テーブル）が見つかりませんでした。保温積算資料のファイルか確認してください。', 'err'); render(); return; }
+          var lm = f.name.match(/令和\s*\d+\s*年度版?|R\d+年度版?/);
+          sk.label = lm ? lm[0].replace(/\s/g, '') : '';
+          st.sk = sk; st.skInfo = { name: f.name, at: U.today(), n: sk.n };
+          if (!save(K_SK, { sk: sk, info: st.skInfo })) toast('保温積算資料をこのパソコンに記憶できませんでした（容量不足の可能性）。表示中は使えます。', 'warn');
+          else toast('保温積算資料を読み込みました（' + f.name + '、' + sk.n + '表）', 'ok');
+          render();
+        } catch (err) { toast('読み込みに失敗しました：' + msg(err), 'err'); render(); }
+      }, 30);
+    };
+    reader.readAsArrayBuffer(f);
+  }
+  function refColsOf() { return (st.master && st.master.output && st.master.output.refCols) || { y: 'Y', z: 'Z', aa: 'AA', ab: 'AB' }; }
+  function priceOrder() {
+    var v = (st.master && st.master.output && st.master.output.priceSrc) || '保温積算資料';
+    var a = v.indexOf('保温'), b = v.indexOf('過去');
+    if (a >= 0 && b >= 0) return a < b ? ['sk', 'hist'] : ['hist', 'sk'];
+    return b >= 0 ? ['hist'] : ['sk'];
+  }
+  function sizeText(size) { var k = kind(); return k && k.series === 'A' ? size + 'A' : k && k.series === 'φ' ? 'φ' + size : String(size); }
+  // 単価と、その参照元（Y〜AB列に書く内容）
+  function priceOf(d, spec, size, f) {
+    var s = st.sel, m = st.master, order = priceOrder(), skr = null;
+    var h = UA.lookPrice(m, s.item, d, spec, size, f, st.memo.idx);
+    if (h.memo) return { p: h.p, key: h.key, cap: ['手入力の記録 ' + h.date, 'c-info'], ref: { y: '手入力の記録（' + h.date + '）', z: spec, aa: sizeText(size), ab: f ? f + 'mm' : '' } };
+    for (var i = 0; i < order.length; i++) {
+      if (order[i] === 'sk') {
+        if (!st.sk) continue;
+        skr = UA.skLook(st.sk, m, { item: s.item, d: d, place: s.place, spec: spec, size: size, f: f });
+        if (skr.p != null) return { p: skr.p, iF: skr.formula, key: h.key, cap: ['積算資料 §' + skr.id + (skr.approx ? '（近い表）' : ''), skr.approx ? 'c-warn' : 'c-info'], ref: skr.ref, tip: skr.ref.y };
+      } else if (h.p != null) {
+        var y = '過去見積 ' + h.date + (h.ref ? '（' + h.ref + 'の単価）' : '') + (h.src ? '　' + h.src : '');
+        return { p: h.p, key: h.key, cap: h.ref ? ['参考：' + h.ref + 'の過去単価', 'c-warn'] : ['過去見積 ' + h.date, 'c-mute'], ref: { y: y, z: spec, aa: sizeText(size), ab: f ? f + 'mm' : '' }, tip: y };
+      }
+    }
+    var noFile = !st.sk && order.indexOf('sk') >= 0;
+    var why = noFile ? '保温積算資料が未読込' : (skr && skr.why && skr.why !== 'nomatch' ? skr.why : '対応する表がありません（M_積算資料対応）');
+    return { p: null, key: h.key, cap: [noFile ? '保温積算資料が未読込' : '単価表に該当なし', 'c-err'], ref: { y: '単価なし：' + why, z: '', aa: '', ab: '' }, tip: why };
   }
 
   /* ---------- シートの読み込み ---------- */
@@ -244,19 +299,19 @@
         if (!en) return;
         var g = U.num(en.g); if (!(g > 0)) return;
         var f = (en.f !== undefined && en.f !== '') ? U.thickKey(en.f) : UA.defThick(st.master, s.item, s.spec, z.n);
-        var lp = UA.lookPrice(st.master, s.item, d, s.spec, z.n, f, st.memo.idx);
+        var pr = priceOf(d, s.spec, z.n, f);
         var manual = en.i !== undefined;
-        var i = manual ? (en.i === '' ? null : U.num(en.i)) : lp.p;
-        out.push({ d: d, e: z.n, f: f, g: g, h: unit, i: i, manual: manual && en.i !== '', pkey: lp.key, auto: lp.p });
+        var i = manual ? (en.i === '' ? null : U.num(en.i)) : pr.p;
+        out.push({ d: d, e: z.n, f: f, g: g, h: unit, i: i, iF: manual ? null : pr.iF, ref: manual ? (en.i === '' ? null : { y: '手入力', z: '', aa: '', ab: '' }) : pr.ref, manual: manual && en.i !== '', pkey: pr.key, auto: pr.p });
       });
     } else {
       var eVal = s.item === 'rect' ? '矩形' : (s.sub || 'BOX');
       var g2 = s.rq !== '' ? U.num(s.rq) : dimsTotal();
       if (g2 > 0) {
         var f2 = (s.rf !== undefined && s.rf !== '') ? U.thickKey(s.rf) : UA.defThick(st.master, s.item, s.spec, eVal);
-        var lp2 = UA.lookPrice(st.master, s.item, d, s.spec, eVal, f2, st.memo.idx);
+        var pr2 = priceOf(d, s.spec, eVal, f2);
         var man2 = s.ri !== undefined;
-        out.push({ d: s.item === 'rect' ? d : '', e: eVal, f: f2, g: g2, h: unit, i: man2 ? (s.ri === '' ? null : U.num(s.ri)) : lp2.p, manual: man2 && s.ri !== '', pkey: lp2.key, auto: lp2.p });
+        out.push({ d: s.item === 'rect' ? d : '', e: eVal, f: f2, g: g2, h: unit, i: man2 ? (s.ri === '' ? null : U.num(s.ri)) : pr2.p, iF: man2 ? null : pr2.iF, ref: man2 ? (s.ri === '' ? null : { y: '手入力', z: '', aa: '', ab: '' }) : pr2.ref, manual: man2 && s.ri !== '', pkey: pr2.key, auto: pr2.p });
       }
     }
     return out;
@@ -278,8 +333,18 @@
       if (!p || !p.ok) throw new Error(p ? p.message : '準備ができていません');
       var cols = colsOf(), maxCol = maxColOf(), jc = cols.j, tpl = st.model.jTpl;
       var undo = { sheet: st.target, cells: [], rows: [] };
+      var rc = refColsOf(), rk = ['y', 'z', 'aa', 'ab'].filter(function (k) { return rc[k]; });
+      var refLines = p.news.filter(function (x) { return x.t === 'line' && x.ref; });
       return Excel.run(function (ctx) {
         var ws = ctx.workbook.worksheets.getItem(st.target);
+        // Y〜AB列の見出し（1行目が空のときだけ書く）
+        var hdr = refLines.length ? rk.map(function (k) { var c = ws.getRange(rc[k] + '1'); c.load('values'); return { k: k, c: c }; }) : [];
+        return ctx.sync().then(function () {
+        hdr.forEach(function (h) {
+          if (!U.isEmpty(h.c.values[0][0])) return;
+          undo.cells.push({ addr: rc[h.k] + '1', v: '' });
+          h.c.values = [[REF_HEAD[h.k]]];
+        });
         p.totalOps.forEach(function (op) { undo.cells.push({ addr: jc + op.origRow, v: op.prev }); });
         p.cellOps.forEach(function (op) {
           var a = cols[op.col] + op.row;
@@ -298,6 +363,8 @@
             else rg.format.font.bold = false;
             if (x.t === 'total' && !(st.api19 && totalSrc)) ws.getRange(cols.label + r + ':' + jc + r).format.font.bold = true;
             rg.formulas = [rowArray(x, r, cols, maxCol, tpl)];
+            // 単価の参照元（Y〜AB列）
+            if (x.t === 'line' && x.ref) rk.forEach(function (k) { ws.getRange(rc[k] + r).values = [[x.ref[k] == null ? '' : x.ref[k]]]; });
           });
           p.totalOps.forEach(function (op) { if (op.type === 'set') ws.getRange(jc + op.finalRow).formulas = [[op.formula]]; });
           var appends = p.totalOps.filter(function (op) { return op.type === 'append'; }).map(function (op) {
@@ -311,6 +378,7 @@
             ws.getRange('A' + p.firstRow + ':' + jc + p.lastRow).select();
             return ctx.sync();
           });
+        });
         });
       }).then(function () {
         undo.rows = p.inserts.map(function (g) { return { start: g.recs[0].finalRow, count: g.count }; });
@@ -340,7 +408,7 @@
     else if (x.t === 'sys') put('sys', x.b);
     else if (x.t === 'spec') { if (x.c) put('place', '(' + x.c + ')'); if (x.d) put('d', x.d); put('spec', '(' + x.e + ')'); }
     else if (x.t === 'line') {
-      put('d', x.dShow || ''); put('size', x.e); put('f', numOrText(x.f)); put('g', x.g); put('h', x.h); put('i', x.i == null ? '' : x.i); put('j', jf(tpl.line));
+      put('d', x.dShow || ''); put('size', x.e); put('f', numOrText(x.f)); put('g', x.g); put('h', x.h); put('i', x.iF || (x.i == null ? '' : x.i)); put('j', jf(tpl.line));
     } else if (x.t === 'elbow') { put('spec', x.e || 'エルボ・チーズ'); put('g', 1); put('h', '式'); put('j', x.j); }
     else if (x.t === 'total') { put('label', x.label); put('j', x.formula); }
     return arr;
@@ -488,6 +556,8 @@
     h.push('<div class="bar">' + (st.master ? '設定マスタ：<b>' + esc(st.masterInfo ? st.masterInfo.name : '') + '</b>' + (st.masterInfo ? '（' + esc(st.masterInfo.at) + '）' : '') : '<span class="warn">設定マスタが未読込</span>') +
       '<button type="button" class="link" data-act="loadMaster">' + (st.master ? '読み直す' : '読み込む') + '</button></div>');
     if (!st.master) { h.push(onboard()); h.push(toastView()); return h.join(''); }
+    if (priceOrder().indexOf('sk') >= 0) h.push('<div class="bar">' + (st.sk ? '単価表：<b>' + esc(st.skInfo ? st.skInfo.name.replace(/\.xlsx?m?$/, '') : '') + '</b>（' + st.sk.n + '表）' : '<span class="warn">保温積算資料（単価表）が未読込</span>') +
+      '<button type="button" class="link" data-act="loadSk">' + (st.sk ? '読み直す' : '読み込む') + '</button></div>');
     h.push(targetView());
     h.push('<div id="main" class="main">');
     if (st.model) {
@@ -503,6 +573,7 @@
   function menuView() {
     return '<div class="menu">' +
       '<button type="button" data-act="loadMaster">設定マスタを読み込む</button>' +
+      '<button type="button" data-act="loadSk">保温積算資料（単価表）を読み込む</button>' +
       '<button type="button" data-act="reload">シートを読み直す</button>' +
       '<button type="button" data-act="autoOpen">' + (st.autoOpen ? '✓ ' : '') + 'このブックを開いたら自動で表示</button>' +
       '<button type="button" data-act="exportMemo">手入力した単価を書き出す（' + st.memo.list.length + '件）</button>' +
@@ -593,13 +664,13 @@
         sel.forEach(function (z) {
           var key = String(z.n), en = s.ent[key];
           var fShown = en.f !== undefined ? en.f : UA.defThick(st.master, s.item, s.spec, z.n);
-          var lp = UA.lookPrice(st.master, s.item, d, s.spec, z.n, U.thickKey(fShown), st.memo.idx);
+          var lp = priceOf(d, s.spec, z.n, U.thickKey(fShown));
           var manual = en.i !== undefined, price = manual ? (en.i === '' ? null : U.num(en.i)) : lp.p, g = U.num(en.g);
-          var cap = manual ? ['手入力', 'c-info'] : lp.p != null ? (lp.ref ? ['参考：' + lp.ref + 'の単価', 'c-warn'] : [(lp.memo ? '手入力の記録 ' : '履歴 ') + lp.date, 'c-mute']) : ['単価の記録なし', 'c-err'];
+          var cap = manual ? ['手入力', 'c-info'] : lp.cap;
           h.push('<div class="qr"><span class="sz">' + esc(k.series === 'A' ? z.n + 'A' : 'φ' + z.n) + '</span>' +
             '<input class="in num c" tabindex="-1" data-f="ent.f" data-k="' + key + '" value="' + esc(fShown) + '" aria-label="' + key + 'の保温厚">' +
             '<input class="in num" data-f="ent.g" data-k="' + key + '" value="' + esc(en.g) + '" placeholder="数量" aria-label="' + key + 'の数量">' +
-            '<span class="pc"><input class="in num' + (price == null ? ' bad' : '') + '" tabindex="-1" data-f="ent.i" data-k="' + key + '" value="' + esc(manual ? en.i : (lp.p != null ? lp.p : '')) + '" placeholder="未登録" aria-label="' + key + 'の単価"><small class="' + cap[1] + '">' + esc(cap[0]) + '</small></span>' +
+            '<span class="pc"><input class="in num' + (price == null ? ' bad' : '') + '" tabindex="-1" data-f="ent.i" data-k="' + key + '" value="' + esc(manual ? en.i : (lp.p != null ? lp.p : '')) + '" placeholder="未登録" aria-label="' + key + 'の単価"><small class="' + cap[1] + '" title="' + esc(manual ? '' : lp.tip || '') + '">' + esc(cap[0]) + '</small></span>' +
             '<span class="amt">' + (price == null || !(g > 0) ? '—' : '¥' + U.yen(g * price)) + '</span>' +
             '<button type="button" class="x" tabindex="-1" data-act="size" data-v="' + key + '" aria-label="' + key + 'を外す">×</button></div>');
         });
@@ -608,14 +679,14 @@
     } else {
       var eVal = s.item === 'rect' ? '矩形' : (s.sub || 'BOX');
       var rf = s.rf !== undefined ? s.rf : UA.defThick(st.master, s.item, s.spec, eVal);
-      var lp2 = UA.lookPrice(st.master, s.item, d, s.spec, eVal, U.thickKey(rf), st.memo.idx);
+      var lp2 = priceOf(d, s.spec, eVal, U.thickKey(rf));
       var man = s.ri !== undefined, pr = man ? (s.ri === '' ? null : U.num(s.ri)) : lp2.p;
       var g2 = s.rq !== '' ? U.num(s.rq) : dimsTotal();
-      var cap2 = man ? ['手入力', 'c-info'] : lp2.p != null ? [(lp2.memo ? '手入力の記録 ' : '履歴 ') + lp2.date, 'c-mute'] : ['単価の記録なし', 'c-err'];
+      var cap2 = man ? ['手入力', 'c-info'] : lp2.cap;
       h.push('<div class="qtab"><div class="qh q4"><span>E列</span><span>保温厚</span><span>数量(㎡)</span><span>単価</span><span>金額</span></div>' +
         '<div class="qr q4"><span class="sz">' + esc(eVal) + '</span><input class="in num c" tabindex="-1" data-f="rf" value="' + esc(rf) + '" aria-label="保温厚">' +
         '<input class="in num" data-f="rq" value="' + esc(s.rq) + '" placeholder="' + (dimsTotal() > 0 ? '寸法から ' + dimsTotal() : '数量') + '" aria-label="数量（平方メートル）">' +
-        '<span class="pc"><input class="in num' + (pr == null ? ' bad' : '') + '" tabindex="-1" data-f="ri" value="' + esc(man ? s.ri : (lp2.p != null ? lp2.p : '')) + '" placeholder="未登録" aria-label="単価"><small class="' + cap2[1] + '">' + esc(cap2[0]) + '</small></span>' +
+        '<span class="pc"><input class="in num' + (pr == null ? ' bad' : '') + '" tabindex="-1" data-f="ri" value="' + esc(man ? s.ri : (lp2.p != null ? lp2.p : '')) + '" placeholder="未登録" aria-label="単価"><small class="' + cap2[1] + '" title="' + esc(man ? '' : lp2.tip || '') + '">' + esc(cap2[0]) + '</small></span>' +
         '<span class="amt">' + (pr == null || !(g2 > 0) ? '—' : '¥' + U.yen(g2 * pr)) + '</span></div></div>');
       h.push('<div class="dims"><div class="lbl">寸法から計算（数量が空欄のとき使用）　2×(W＋H)×長さ</div>' + s.dims.map(function (dd, i) {
         var w = U.num(dd.w), hh = U.num(dd.h), l = U.num(dd.l), a = (w > 0 && hh > 0 && l > 0) ? 2 * (w + hh) / 1000 * l : 0;
@@ -679,6 +750,7 @@
       switch (a) {
         case 'menu': st.ui.menu = !st.ui.menu; break;
         case 'loadMaster': st.ui.menu = false; $('#masterFile').click(); return;
+        case 'loadSk': st.ui.menu = false; $('#skFile').click(); return;
         case 'reload': refreshSheets().then(render); return;
         case 'autoOpen': setAutoOpen(!st.autoOpen); return;
         case 'exportMemo': exportMemo(); return;

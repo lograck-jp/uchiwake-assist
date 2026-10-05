@@ -103,7 +103,7 @@
     rows('M_施工箇所').forEach(function (r) {
       var p = trimAll(stripParen(pick(r, '施工箇所')));
       if (!p) return;
-      m.places.push({ name: p, aliases: str(pick(r, 'スマート入力の別名')).split(/[、,，\s]+/).filter(Boolean), use: useOK(pick(r, '使用する')), order: num(pick(r, '表示順')) });
+      m.places.push({ name: p, aliases: str(pick(r, 'スマート入力の別名')).split(/[、,，\s]+/).filter(Boolean), use: useOK(pick(r, '使用する')), order: num(pick(r, '表示順')), grp: trimAll(pick(r, '積算資料の場所')) });
     });
     m.places.sort(bySort);
 
@@ -137,7 +137,7 @@
       m.prices.push({
         item: str(pick(r, '品目ID')), kind: str(pick(r, '仕様区分')) || KIND_OF_ITEM[str(pick(r, '品目ID'))] || '',
         d: str(pick(r, '種別')), spec: spec, size: sizeKey(pick(r, 'サイズ')), f: thickKey(pick(r, '保温厚')),
-        unit: str(pick(r, '単位')), price: num(price), date: dateStr(pick(r, '見積日')), sys: str(pick(r, '系統')), place: trimAll(pick(r, '施工箇所'))
+        unit: str(pick(r, '単位')), price: num(price), date: dateStr(pick(r, '見積日')), sys: str(pick(r, '系統')), place: trimAll(pick(r, '施工箇所')), src: str(pick(r, '出典'))
       });
     });
 
@@ -149,14 +149,30 @@
     });
 
     var cols = { area: 'A', sys: 'B', place: 'C', d: 'D', spec: 'E', size: 'E', f: 'F', g: 'G', h: 'H', i: 'I', j: 'J', label: 'I' };
-    var out = { cols: cols, startRow: 5, amountTpl: '=IF(AND(G{行}<>"",I{行}=""),0,IF(AND(G{行}="",I{行}=""),"",IF(AND(G{行}<>"",I{行}<>""),G{行}*I{行},"")))' };
+    var refCols = { y: 'Y', z: 'Z', aa: 'AA', ab: 'AB' };
+    var REFKEY = { '単価の参照元': 'y', '参照した仕様': 'z', '参照したサイズ': 'aa', '参照した厚み': 'ab' };
+    var out = { cols: cols, refCols: refCols, priceSrc: '保温積算資料', skFactor: 1, startRow: 5, amountTpl: '=IF(AND(G{行}<>"",I{行}=""),0,IF(AND(G{行}="",I{行}=""),"",IF(AND(G{行}<>"",I{行}<>""),G{行}*I{行},"")))' };
     var MAPKEY = { '大項目': 'area', '系統': 'sys', '施工箇所': 'place', '種別': 'd', '仕様': 'spec', 'サイズ': 'size', '保温厚': 'f', '数量': 'g', '単位': 'h', '単価': 'i', '金額': 'j', '系統計（ラベル）': 'label' };
     (sheets['M_出力設定'] || []).forEach(function (r) {
       var k = str(pick(r, '項目')), c = trimAll(pick(r, '列')), v = str(pick(r, '書き込む内容'));
       if (k === '明細の開始行' && num(v) > 0) out.startRow = num(v);
       if (k === '金額' && v.charAt(0) === '=') out.amountTpl = v;
       if (MAPKEY[k] && /^[A-Za-z]{1,2}$/.test(c)) cols[MAPKEY[k]] = c.toUpperCase();
+      if (REFKEY[k]) refCols[REFKEY[k]] = /^[A-Za-z]{1,3}$/.test(c) ? c.toUpperCase() : '';
+      if (k === '単価の取り方' && v) out.priceSrc = v;
+      if (k === '保温積算資料の掛率' && num(v) > 0) out.skFactor = num(v);
     });
+    // 保温積算資料の対応表・加算（シートがあればそれを使う。無ければ既定）
+    if (sheets['M_積算資料対応']) {
+      m.skRulesRaw = sheets['M_積算資料対応'].filter(function (r) { return useOK(pick(r, '使用する')); }).map(function (r) {
+        return [pick(r, '品目'), pick(r, '種別'), pick(r, '場所'), pick(r, '仕様'), pick(r, '表ID'), pick(r, '列'), pick(r, '行'), pick(r, '上被'), pick(r, '掛率'), pick(r, '加算'), pick(r, 'サイズ下限'), pick(r, 'サイズ上限'), pick(r, 'メモ')];
+      });
+    }
+    if (sheets['M_単価加算']) {
+      m.skAdjRaw = sheets['M_単価加算'].filter(function (r) { return useOK(pick(r, '使用する')); }).map(function (r) {
+        return [pick(r, '対象'), pick(r, '含む語'), pick(r, '加算'), pick(r, '掛率'), pick(r, 'メモ')];
+      });
+    }
     m.output = out;
 
     (sheets['M_別名'] || []).forEach(function (r) {
@@ -188,12 +204,12 @@
       var dk = p.kind === 'valve' ? p.d : '';
       var key = p.kind + '|' + dk + '|' + p.spec + '|' + p.size + '|' + p.f;
       var cur = price[key];
-      if (!cur || p.date >= cur.date) price[key] = { p: p.price, date: p.date, d: p.d, ref: null };
+      if (!cur || p.date >= cur.date) price[key] = { p: p.price, date: p.date, d: p.d, ref: null, src: p.src, spec: p.spec, size: p.size, f: p.f };
       if (p.kind === 'valve') {
         var k2 = 'valve|*|' + p.spec + '|' + p.size + '|' + p.f;
         var c2 = price[k2];
         var better = !c2 || p.date > c2.date || (p.date === c2.date && rank(p.d) < rank(c2.d));
-        if (better) price[k2] = { p: p.price, date: p.date, d: p.d, ref: p.d };
+        if (better) price[k2] = { p: p.price, date: p.date, d: p.d, ref: p.d, src: p.src, spec: p.spec, size: p.size, f: p.f };
       }
       var ck = p.kind + '|' + p.place + '|' + p.spec;
       specCount[ck] = (specCount[ck] || 0) + 1;
@@ -203,6 +219,8 @@
     function rank(d) { var i = VALVE_PRI.indexOf(d); return i < 0 ? 99 : i; }
     m.thick.forEach(function (t) { thick[t.kind + '|' + t.spec + '|' + t.size] = t.f; });
     m.priceIdx = price; m.specCount = specCount; m.thickIdx = thick;
+    m.skRules = m.skRulesRaw && m.skRulesRaw.length ? UA.compileSkRules(m.skRulesRaw) : null;
+    m.skAdj = m.skAdjRaw ? UA.compileSkAdj(m.skAdjRaw) : null;
     m.kindById = {}; m.kinds.forEach(function (k) { m.kindById[k.id] = k; });
     return m;
   };
@@ -215,10 +233,10 @@
     var hit = m.priceIdx[key] || null;
     var memo = local && local[key];
     if (memo && (!hit || memo.date >= hit.date)) return { p: memo.p, date: memo.date, ref: null, memo: true, key: key };
-    if (hit) return { p: hit.p, date: hit.date, ref: null, key: key };
+    if (hit) return { p: hit.p, date: hit.date, ref: null, key: key, src: hit.src, d: hit.d };
     if (kind === 'valve') {
       var fb = m.priceIdx['valve|*|' + spec + '|' + sizeKey(size) + '|' + thickKey(f)];
-      if (fb) return { p: fb.p, date: fb.date, ref: fb.ref, key: key };
+      if (fb) return { p: fb.p, date: fb.date, ref: fb.ref, key: key, src: fb.src, d: fb.d };
     }
     return { p: null, key: key };
   };
@@ -261,6 +279,491 @@
     }
     return v;
   };
+
+  /* ========== 保温積算資料（単価表） ==========
+     読み込んだ「保温積算資料」の表（tbl_○_○）から、仕様・施工箇所・サイズ・保温厚で単価を引く。
+     どの仕様をどの表に当てるかは「対応表」（設定マスタ M_積算資料対応、無ければ下の既定）で決める。 */
+
+  // 照合用の正規化（全角半角・空白・＋・半角カナを統一。「ヒーター＋」は外す）
+  function nk(s) {
+    var t = String(s == null ? '' : s);
+    try { t = t.normalize('NFKC'); } catch (e) { t = toHalf(t); }
+    t = t.replace(/[\s　]+/g, '').replace(/\+/g, '＋');
+    t = t.replace(/ヒーター＋/g, '').replace(/ポリフイルム/g, 'ポリフィルム').replace(/ガラスクロス巻/g, 'ガラスクロス');
+    return t;
+  }
+  UA.nk = nk;
+  // Excel の Like と同じ書き方（* と ?）のパターン
+  function likeRe(p) {
+    var s = nk(p).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+    return new RegExp('^' + s + '$');
+  }
+  UA.likeRe = likeRe;
+
+  // ---- 保温積算資料の読み込み（SheetJS の bookFiles:true で読んだブック） ----
+  UA.parseSekisan = function (wb, X) {
+    var files = wb.files || {};
+    function raw(p) { return files[p] || files['/' + p] || null; }
+    function text(p) {
+      var f = raw(p); if (!f) return '';
+      var c = f.content != null ? f.content : f._data;
+      if (typeof c === 'string') return c;
+      try { return new TextDecoder('utf-8').decode(c instanceof Uint8Array ? c : new Uint8Array(c)); } catch (e) { return ''; }
+    }
+    function attr(x, name) { var m = x.match(new RegExp('\\s' + name + '="([^"]*)"')); return m ? m[1] : ''; }
+    function unxml(s) { return String(s).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&'); }
+    function resolve(base, target) {
+      if (target.charAt(0) === '/') return target.slice(1);
+      var parts = base.split('/'); parts.pop();
+      target.split('/').forEach(function (s) { if (s === '..') parts.pop(); else if (s !== '.') parts.push(s); });
+      return parts.join('/');
+    }
+    function rels(p) {
+      var out = {}, x = text(p), re = /<Relationship\s([^>]*)\/?>/g, m;
+      while ((m = re.exec(x))) out[attr(' ' + m[1], 'Id')] = { target: attr(' ' + m[1], 'Target'), type: attr(' ' + m[1], 'Type') };
+      return out;
+    }
+    var wbx = text('xl/workbook.xml'), wrel = rels('xl/_rels/workbook.xml.rels');
+    var sheetFile = {}, re = /<sheet\s([^>]*)\/?>/g, mm;
+    while ((mm = re.exec(wbx))) {
+      var a = ' ' + mm[1], rid = attr(a, 'r:id'), nm = unxml(attr(a, 'name'));
+      if (wrel[rid]) sheetFile[nm] = resolve('xl/workbook.xml', wrel[rid].target);
+    }
+    function cv(ws, r, c) { var cell = ws[X.utils.encode_cell({ r: r, c: c })]; return cell ? cell.v : null; }
+    function cs(ws, r, c) { var v = cv(ws, r, c); return v == null ? '' : String(v).trim(); }
+    var out = { tables: {}, secs: {}, n: 0 };
+    wb.SheetNames.forEach(function (sn) {
+      var ws = wb.Sheets[sn], sf = sheetFile[sn];
+      if (!ws || !sf) return;
+      var sec = (sn.match(/§\s*(\d+)/) || [])[1] || '';
+      // 章の題（例「§2 給水・冷水・冷温水：GW/屋内露出」）
+      for (var r0 = 0; r0 < 6 && sec; r0++) {
+        var t0 = cs(ws, r0, 0);
+        if (t0.indexOf('§') === 0) { out.secs[sec] = t0.replace(/^§\s*\d+\s*/, ''); break; }
+      }
+      var srel = rels(sf.replace(/([^/]+)$/, '_rels/$1.rels'));
+      Object.keys(srel).forEach(function (k) {
+        if (!/\/table$/.test(srel[k].type)) return;
+        var tx = text(resolve(sf, srel[k].target));
+        if (!tx) return;
+        var dn = attr(tx, 'displayName') || attr(tx, 'name'), ref = attr(tx, 'ref');
+        if (!ref) return;
+        var rg = X.utils.decode_range(ref);
+        var cols = [], cre = /<tableColumn\s([^>]*)>/g, cm;
+        while ((cm = cre.exec(tx))) cols.push(unxml(attr(' ' + cm[1], 'name')));
+        if (!cols.length) for (var c = rg.s.c; c <= rg.e.c; c++) cols.push(cs(ws, rg.s.r, c));
+        var rows = [];
+        for (var r = rg.s.r + 1; r <= rg.e.r; r++) {
+          var row = [cs(ws, r, rg.s.c)];
+          for (var c2 = rg.s.c + 1; c2 <= rg.e.c; c2++) { var v = cv(ws, r, c2); row.push(typeof v === 'number' ? v : (v != null && v !== '' && isFinite(+v) ? +v : null)); }
+          rows.push(row);
+        }
+        var title = '';
+        for (var r1 = rg.s.r - 1; r1 >= Math.max(0, rg.s.r - 6); r1--) { var tt = cs(ws, r1, 0); if (tt.charAt(0) === '【') { title = tt; break; } }
+        var comp = '';
+        for (var r2 = rg.e.r + 1; r2 <= rg.e.r + 2; r2++) { var tc = cs(ws, r2, 0); if (tc.indexOf('構成') === 0) { comp = tc; break; } }
+        var id = (title.match(/^【([^】]+)】/) || [])[1] || String(dn).replace(/^tbl_/, '').replace('_', '-');
+        var unit = (title.match(/（(円\/[^）]+)）/) || [])[1] || '';
+        var name = title.replace(/^【[^】]+】/, '').replace(/（円\/[^）]+）/, '').trim();
+        if (name.indexOf(id + ' ') === 0) name = name.slice(id.length + 1);
+        out.tables[id] = { id: id, sec: sec, name: name, unit: unit, cols: cols, rows: rows, comp: comp };
+        out.n++;
+      });
+    });
+    return out;
+  };
+
+  // 列見出しを「仕上げ」と「厚み」に分ける（例「(ALK貼)/AL粘着テープ/カラー亀甲金網10mm 同 50mm」）
+  function colDesc(cols) {
+    var out = [], prev = '';
+    for (var j = 0; j < cols.length; j++) {
+      var h = String(cols[j] || '').trim(), m, fin = h, t = null;
+      if ((m = h.match(/^(\d+(?:\.\d+)?)\s*mm$/))) { fin = ''; t = m[1]; }
+      else if ((m = h.match(/^同\s*(\d+(?:\.\d+)?)\s*mm$/))) { fin = prev; t = m[1]; }
+      else if ((m = h.match(/^(.*\S)\s+(?:同\s*)?(\d+(?:\.\d+)?)\s*mm$/))) { fin = m[1]; t = m[2]; }
+      if (fin) prev = fin;
+      out.push({ fin: fin, t: t, h: h });
+    }
+    return out;
+  }
+  // 表の保温厚が固定のとき（見出しの「×50mm」や構成の「厚み50mm」）
+  function fixedT(tbl, col) {
+    var m = String(col && col.h || '').match(/×\s*(\d+)\s*mm/) || String(tbl.cols[0] || '').match(/厚み\s*(\d+)\s*mm/) || String(tbl.comp || '').match(/厚み\s*(\d+)\s*mm/);
+    if (!m && col && col.t == null) { for (var j = 1; j < tbl.cols.length && !m; j++) m = String(tbl.cols[j]).match(/×\s*(\d+)\s*mm/); }
+    return m ? m[1] : null;
+  }
+  // 角ダクト等の行（保温材）を仕様から決める
+  function matLabel(spec) {
+    var t = nk(spec);
+    if (/Rwフェルト|Rwロール/.test(t)) return 'ロックウールフェルト1号';
+    if (/Rw板2号|Rw板(1[2-9]\d|[2-9]\d\d)K/.test(t)) return 'ロックウール板2号';
+    if (/Rw板/.test(t)) return 'ロックウール板1号';
+    if (/Rwブランケット|ロックウールブランケット/.test(t)) return 'ロックウールブランケット1号';
+    if (/Gwロール32K/.test(t)) return 'グラスウールロール32K';
+    if (/Gwロール/.test(t)) return 'グラスウールロール24K';
+    if (/Gw板32K/.test(t)) return 'グラスウール板32K';
+    if (/Gw板/.test(t)) return 'グラスウール板40K';
+    if (/ポリスチレンフォーム/.test(t)) return 'ポリスチレンフォーム3号';
+    return '';
+  }
+  UA.matLabel = matLabel;
+
+  // ---- 対応表（既定）----
+  // [品目, 種別, 場所, 仕様（* と ? が使える）, 表ID, 列（仕上げ）, 行, 上被の表ID, 掛率, 加算, サイズ下限, サイズ上限, メモ]
+  //  品目：pipe / valve / flange / rect / round / box（カンマ区切り可、* はすべて）
+  //  場所：屋内露出 / 隠蔽 / ピット / 屋外露出 / 多湿 / 内貼 / *（M_施工箇所の「積算資料の場所」で決まる）
+  //  表ID：「配管」と書くと、同じ仕様の配管の単価を使う（掛率をかける）
+  //  列：空欄＝保温厚の列。文字＝その仕上げの列（厚み付きの見出しは保温厚も合わせる）
+  //  行：空欄＝サイズ。「自動」＝仕様の保温材（Gw板40K→グラスウール板40K など）＋保温厚。その他＝行の名前
+  function skDefaultRules() {
+    var R = [];
+    function add(items, ds, place, pat, id, col, row, over, factor, plus, memo) { R.push([items, ds || '', place, pat, id, col || '', row || '', over || '', factor || '', plus || '', '', '', memo || '']); }
+    function P(place, pat, id, over, memo) { add('pipe', '', place, pat, id, '', '', over, '', '', memo); }
+    var M16 = '表は亀甲金網16mm';
+    // --- 配管：グラスウール筒 ---
+    P('屋内露出', 'Gw筒＋ポリ*＋整形原紙＋綿*', '2-1'); P('屋内露出', 'Gw筒＋ポリ*＋整形原紙＋*テープ', '2-2');
+    P('屋内露出', 'Gw筒＋ポリ*＋ALGC原紙＋ALGC粘着テープ', '2-3'); P('屋内露出', 'Gw筒＋ポリ*＋ファインカバー', '2-4');
+    P('屋内露出', 'Gw筒＋ポリ*＋着色ALGC原紙＋着色ALGC粘着テープ', '2-5');
+    P('屋内露出', 'ALK-P付Gw筒＋カラー金網10m/m', '2-6'); P('屋内露出', 'ALGC-P付Gw筒＋*カラー金網10m/m', '2-7');
+    P('屋内露出', 'Gw筒＋整形原紙＋綿*', '1-1'); P('屋内露出', 'Gw筒＋整形原紙＋*テープ', '1-2');
+    P('屋内露出', 'Gw筒＋ALGC原紙＋ALGC粘着テープ', '1-3'); P('屋内露出', 'Gw筒＋ファインカバー', '1-4');
+    P('屋内露出', 'Gw筒＋着色ALGC原紙＋着色ALGC粘着テープ', '1-5'); P('屋内露出', '着色ALGC付Gw筒＋着色ALGC粘着テープ', '1-5', '', '表は着色ALGC化粧原紙');
+    P('屋内露出', 'ALK付Gw筒＋カラー金網10m/m', '1-6'); P('屋内露出', 'ALGC付Gw筒＋*カラー金網10m/m', '1-7');
+    P('隠蔽', 'Gw筒＋ポリ*＋*テープ', '4-1'); P('隠蔽', 'ALK-P付Gw筒＋亀甲金網16m/m', '4-2'); P('隠蔽', 'ALK-P付Gw筒＋カラー金網16m/m', '4-2', '', M16);
+    P('隠蔽', 'ALGC-P付Gw筒＋*亀甲金網16m/m', '4-3'); P('隠蔽', 'ALGC-P付Gw筒＋ALGC粘着テープ', '4-3', '', '表は亀甲金網16mm込み');
+    P('隠蔽', 'Gw筒＋*テープ', '3-1'); P('隠蔽', 'ALGC付Gw筒＋ALGC粘着テープ', '3-2'); P('隠蔽', 'ALGC付Gw筒＋*亀甲金網16m/m', '3-3');
+    P('隠蔽', 'ALK付Gw筒＋亀甲金網16m/m', '3-4'); P('隠蔽', 'ALK付Gw筒＋カラー金網16m/m', '3-4', '', M16);
+    P('ピット', 'Gw筒＋ポリ*＋着色ALGC*', '5-1'); P('ピット', '着色ALGC-P付Gw筒＋着色ALGC粘着テープ', '5-1', '', '表はポリエチレンフィルム＋着色ALGCテープ');
+    P('ピット', 'ALW裏貼Gw筒＋カラー金網16m/m', '5-2');
+    P('*', 'Gw筒＋ポリ*＋カラー鉄板', '6-1', '19-3'); P('*', 'Gw筒＋ポリ*＋*ステンレス*', '6-1', '19-5'); P('*', 'Gw筒＋ポリ*＋ガルバ*', '6-1', '19-4'); P('*', 'Gw筒＋ポリ*＋亜鉛鉄板', '6-1', '19-2');
+    P('*', 'Gw筒＋ポリテープ', '6-1'); P('*', 'Gw筒＋ポリフィルム', '6-1');
+    P('*', 'ALW裏貼Gw筒＋カラー鉄板', '6-1', '19-3', 'ALW貼は§6で代用'); P('*', 'ALW裏貼Gw筒＋ガルバ*', '6-1', '19-4', 'ALW貼は§6で代用');
+    P('*', 'Gw筒＋カラー鉄板', '7-1', '19-3'); P('*', 'Gw筒＋*ステンレス*', '7-1', '19-5'); P('*', 'Gw筒＋ガルバ*', '7-1', '19-4'); P('*', 'Gw筒＋亜鉛鉄板', '7-1', '19-2');
+    P('*', 'ALK付Gw筒＋カラー鉄板', '7-1', '19-3', 'ALK貼の分は含まず');
+    P('*', 'Gw筒＋ファインジャケット', '7-1', '19-1', 'ファインカバーJを上被で計上'); P('*', 'Gw筒', '7-1');
+    // --- 配管：ロックウール筒 ---
+    P('屋内露出', 'Rw筒＋ポリ*＋整形原紙＋綿*', '9-1'); P('屋内露出', 'Rw筒＋ポリ*＋整形原紙＋*テープ', '9-2');
+    P('屋内露出', 'Rw筒＋ポリ*＋ALGC原紙＋ALGC粘着テープ', '9-3'); P('屋内露出', 'Rw筒＋ポリ*＋ファインカバー', '9-4');
+    P('屋内露出', 'Rw筒＋ポリ*＋着色ALGC原紙＋着色ALGC粘着テープ', '9-5'); P('屋内露出', 'ALK-P付Rw筒＋カラー金網10m/m', '9-6');
+    P('屋内露出', 'Rw筒＋整形原紙＋綿*', '8-1'); P('屋内露出', 'Rw筒＋整形原紙＋*テープ', '8-2'); P('屋内露出', 'Rw筒＋ALGC原紙＋ALGC粘着テープ', '8-3');
+    P('屋内露出', 'Rw筒＋ファインカバー', '8-4'); P('屋内露出', 'Rw筒＋着色ALGC原紙＋着色ALGC粘着テープ', '8-5'); P('屋内露出', 'ALK付Rw筒＋カラー金網10m/m', '8-6');
+    P('隠蔽', 'Rw筒＋ポリ*＋*テープ', '10-2'); P('隠蔽', 'Rw筒＋*テープ', '10-1'); P('隠蔽', 'ALGC付Rw筒＋ALGC粘着テープ', '10-3');
+    P('隠蔽', 'ALGC-P付Rw筒＋ALGC粘着テープ', '10-3', '', 'ポリ付きの表なし（ALGC貼の表）'); P('隠蔽', 'ALK付Rw筒＋亀甲金網16m/m', '10-4'); P('隠蔽', 'ALK付Rw筒＋カラー金網*', '10-4', '', M16);
+    P('ピット', 'Rw筒＋ポリ*＋着色ALGC*', '11-1'); P('ピット', '着色ALGC-P付Rw筒＋着色ALGC粘着テープ', '11-1', '', '表はポリエチレンフィルム＋着色ALGCテープ');
+    P('ピット', 'ALW裏貼Rw筒＋カラー金網16m/m', '11-2');
+    P('*', 'Rw筒＋ポリ*＋カラー鉄板', '12-1', '19-3'); P('*', 'Rw筒＋ポリ*＋*ステンレス*', '12-1', '19-5'); P('*', 'Rw筒＋ポリ*＋ガルバ*', '12-1', '19-4'); P('*', 'Rw筒＋ポリ*＋亜鉛鉄板', '12-1', '19-2');
+    P('*', 'Rw筒＋ポリテープ', '12-1'); P('*', 'Rw筒＋ポリフィルム', '12-1');
+    P('*', 'Rw筒＋カラー鉄板', '13-1', '19-3'); P('*', 'Rw筒＋*ステンレス*', '13-1', '19-5'); P('*', 'Rw筒＋ガルバ*', '13-1', '19-4'); P('*', 'Rw筒＋亜鉛鉄板', '13-1', '19-2');
+    P('*', 'ALK付Rw筒＋カラー鉄板', '13-1', '19-3', 'ALK貼の分は含まず'); P('*', 'Rw筒', '13-1');
+    // --- 配管：ポリスチレンフォーム筒（PF筒） ---
+    P('屋内露出', 'PF筒＋ポリ*＋整形原紙＋綿*', '14-2'); P('屋内露出', 'PF筒＋整形原紙＋綿*', '14-1'); P('屋内露出', 'PF筒＋*ファインカバー', '14-3');
+    P('屋内露出', 'PF筒＋ポリ*＋整形原紙＋*テープ', '14-5'); P('屋内露出', 'PF筒＋整形原紙＋*テープ', '14-4');
+    P('屋内露出', 'PF筒＋ポリ*＋ALGC原紙＋ALGC粘着テープ', '14-7'); P('屋内露出', 'PF筒＋ALGC原紙＋ALGC粘着テープ', '14-6');
+    P('屋内露出', 'PF筒＋ポリ*＋着色ALGC原紙＋着色ALGC粘着テープ', '14-8'); P('屋内露出', 'ALK-P付PF筒＋カラー金網10m/m', '14-9');
+    P('隠蔽', 'PF筒＋ポリ*＋*テープ', '15-2'); P('隠蔽', 'PF筒＋ビニルテープ', '15-3'); P('隠蔽', 'PF筒＋*テープ', '15-1');
+    P('隠蔽', 'ALGC付PF筒*＋ALGC粘着テープ', '15-4'); P('隠蔽', 'PF筒＋アルミクラフト*', '15-5'); P('隠蔽', 'ALK-P付PF筒＋亀甲金網16m/m', '15-6');
+    P('ピット', 'PF筒＋ポリ*＋着色ALGC*', '16-1'); P('ピット', '着色ALGC-P付PF筒＋着色ALGC粘着テープ', '16-1', '', '表はポリエチレンフィルム＋着色ALGCテープ');
+    P('ピット', 'PF筒＋着色ALGC*', '16-1', '', '表はポリエチレンフィルム付き'); P('ピット', 'ALW裏貼PF筒＋カラー金網16m/m', '16-2');
+    P('*', 'PF筒＋ポリ*＋カラー鉄板', '17-1', '19-3'); P('*', 'PF筒＋ポリ*＋*ステンレス*', '17-1', '19-5'); P('*', 'PF筒＋ポリ*＋ガルバ*', '17-1', '19-4'); P('*', 'PF筒＋ポリ*＋亜鉛鉄板', '17-1', '19-2');
+    P('*', 'PF筒＋ポリテープ', '17-1'); P('*', 'PF筒＋ポリフィルム', '17-1');
+    P('*', 'PF筒＋カラー鉄板', '18-1', '19-3'); P('*', 'PF筒＋*ステンレス*', '18-1', '19-5'); P('*', 'PF筒＋ガルバ*', '18-1', '19-4'); P('*', 'PF筒＋亜鉛鉄板', '18-1', '19-2'); P('*', 'PF筒', '18-1');
+    // --- 配管：上被だけ・パイプガード・防食 ---
+    P('*', 'ファインカバー', '19-1'); P('*', '亜鉛鉄板', '19-2'); P('*', 'カラー鉄板', '19-3'); P('*', 'ガルバ*', '19-4'); P('*', 'ステンレス*', '19-5');
+    add('pipe', '', '*', 'パイプガード*', '20-1', '直管部 20mm');
+    add('pipe', '', '*', '防食ビニ*', '21-1', '防食ビニールテープ 1/2・3回巻'); add('pipe', '', '*', '防食テープ', '21-1', '防食ビニールテープ 1/2・3回巻');
+    add('pipe', '', '*', '自己融着テープ*0.4*', '21-1', '自己融着テープ 0.4mm 1/2・1回巻'); add('pipe', '', '*', '自己融着テープ*1.0*', '21-1', '自己融着テープ 1.0mm 1/2・2回巻');
+    add('pipe', '', '*', '*ペトロ*シート*', '21-1', '継手部 ペトロ系ペースト/ペトロラタムシート/プラスチックテープ');
+    add('pipe', '', '*', '*ペトロ*', '21-1', '配管部 ペトロ系ペースト/ペトロラタムテープ/プラスチックテープ');
+    // --- 弁・フランジ（65A以上。小さいGVで筒の仕様は配管×1.2） ---
+    add('valve', 'GV', '*', '*筒＋*', '配管', '', '', '', 1.2, '', '配管の単価×1.2（GV）');
+    function V(items, ds, gw, rw) {
+      var c1 = 'GWロール(ALK)24K×50mm+カラー亀甲金網10mm', c2 = 'GW帯(ALGC)40K×50mm+カラー亀甲金網10mm';
+      if (gw === '24-1') {
+        add(items, ds, '*', '*Gw*＋*亜鉛鉄板', gw, 'グラスウール保温帯40K×50mm+ポリエチレンフィルム 亜鉛鉄板');
+        add(items, ds, '*', '*Gw*＋*カラー鉄板', gw, 'カラー鉄板'); add(items, ds, '*', '*Gw*＋*ガルバ*', gw, 'ガルバニウム鋼板'); add(items, ds, '*', '*Gw*＋*ステンレス*', gw, 'ステンレス鋼板 SUS304');
+      } else {
+        add(items, ds, '*', '*Gw帯*＋*カラー鉄板', gw, 'グラスウール保温帯40K×50mm+ポリエチレンフィルム カラー鉄板');
+        add(items, ds, '*', '*Gw帯*＋*ガルバ*', gw, 'ガルバニウム鋼板'); add(items, ds, '*', '*Gw帯*＋*ステンレス*', gw, 'ステンレス鋼板 SUS304');
+        add(items, ds, '屋内露出', 'ALK*Gwロール*＋カラー金網10m/m', gw, c1);
+        add(items, ds, '*', 'ALK*Gwロール*', gw, c1, '', '', '', '', '表はカラー亀甲金網10mm');
+        add(items, ds, '屋内露出', 'ALGC*Gw帯*＋*カラー金網10m/m', gw, c2);
+        add(items, ds, '*', '*ALGC*Gw帯*', gw, c2, '', '', '', '', '表はALGC貼＋カラー亀甲金網10mm');
+        add(items, ds, '*', '*Gw帯*ALGC*', gw, c2, '', '', '', '', '表はALGC貼＋カラー亀甲金網10mm');
+      }
+      if (rw === '27-1') {
+        add(items, ds, '*', '*Rw*＋*亜鉛鉄板', rw, 'ロックウール保温帯1号×50mm+ポリエチレンフィルム 亜鉛鉄板');
+      } else {
+        add(items, ds, '*', '*Rw*＋*亜鉛鉄板', rw, 'ロックウール保温帯1号×50mm+ポリエチレンフィルム 亜鉛鉄板');
+        add(items, ds, '*', '*Rw*＋*カラー金網10m/m', rw, 'RW帯(ALGC)1号50mm+カラー亀甲金網10mm');
+      }
+      add(items, ds, '*', '*Rw*＋*カラー鉄板', rw, 'カラー鉄板'); add(items, ds, '*', '*Rw*＋*ガルバ*', rw, 'ガルバニウム鋼板'); add(items, ds, '*', '*Rw*＋*ステンレス*', rw, 'ステンレス鋼板 SUS304');
+    }
+    V('valve,flange', 'BV,BAV,バタフライ*,FLG,フランジ,FJ*,SUSFJ', '23-1', '26-1');
+    V('valve', 'ラインポンプ,ポンプ', '24-1', '27-1');
+    V('valve', '', '22-1', '25-1');
+    V('flange', '', '23-1', '26-1');
+    // --- 丸ダクト ---
+    function D(place, pat, id, col, memo) { add('round', '', place, pat, id, col, '', '', '', '', memo); }
+    var K10 = 'カラー亀甲金網10mm', K16 = '亀甲金網16mm';
+    D('屋内露出', 'ALK付Gwロール32K＋カラー金網10m/m', '35-5', '(ALK貼)/AL粘着テープ/' + K10); D('屋内露出', 'ALW裏貼Gwロール32K＋カラー金網10m/m', '35-5', '(ALW貼)/ALW粘着テープ/' + K10);
+    D('屋内露出', 'ALGC付Gwロール32K＋*カラー金網10m/m', '35-5', '(ALGC貼)/ALGC粘着テープ/' + K10);
+    D('屋内露出', 'ALK付Gwロール*＋カラー金網10m/m', '35-3', '(ALK貼)/AL粘着テープ/' + K10); D('屋内露出', 'ALW裏貼Gwロール*＋カラー金網10m/m', '35-3', '(ALW貼)/ALW粘着テープ/' + K10);
+    D('屋内露出', 'ALGC付Gwロール*＋*カラー金網10m/m', '35-3', '(ALGC貼)/ALGC粘着テープ/' + K10);
+    D('屋内露出', '*Gwロール32K＋整形原紙＋綿*', '35-4', '整形原紙/綿布'); D('屋内露出', '*Gwロール32K＋整形原紙＋*', '35-4', '整形原紙/アルミガラスクロス');
+    D('屋内露出', '*Gwロール*＋整形原紙＋綿*', '35-1', '整形原紙/綿布'); D('屋内露出', '*Gwロール*＋整形原紙＋*', '35-1', '整形原紙/アルミガラスクロス');
+    D('屋内露出', '*Gwロール*＋亜鉛鉄板', '35-2', '亜鉛鉄板'); D('屋内露出', '*Gwロール*＋カラー鉄板', '35-2', 'カラー鉄板'); D('屋内露出', '*Gwロール*＋ガルバ*', '35-2', 'ガルバニウム鋼板'); D('屋内露出', '*Gwロール*＋*ステンレス*', '35-2', 'ステンレス鋼板');
+    D('屋内露出', '*Gw帯*＋カラー鉄板', '35-7', 'カラー鉄板'); D('屋内露出', '*Gw帯*＋ガルバ*', '35-7', 'ガルバニウム鋼板'); D('屋内露出', '*Gw帯*＋*ステンレス*', '35-7', 'ステンレス鋼板');
+    D('屋内露出', '*波形*＋*カラー金網10m/m', '35-8', 'GW波形保温板40K(ALGC)/ALGC粘着テープ/' + K10); D('屋内露出', '*ウェーブ*＋*カラー金網10m/m', '35-8', 'GW波形保温板40K(ALGC)/ALGC粘着テープ/' + K10);
+    D('屋内露出', '*波形*＋*ALGC粘着テープ', '35-8', 'GW波形保温板40K(ALGC)/ALGC粘着テープ'); D('屋内露出', '*ウェーブ*＋*ALGC粘着テープ', '35-8', 'GW波形保温板40K(ALGC)/ALGC粘着テープ');
+    D('屋内露出', 'ALGC付Gw帯*＋*カラー金網10m/m', '35-8', 'GW帯40K(ALGC)/ALGC粘着テープ/' + K10); D('屋内露出', 'ALGC付Gw帯*＋ALGC粘着テープ', '35-8', 'GW帯40K(ALGC)/ALGC粘着テープ');
+    D('屋内露出', '*着色ALGC*Gw帯*', '35-6', '着色ALGC化粧原紙/着色ALGC粘着テープ'); D('屋内露出', '*Gw帯*＋整形原紙＋綿*', '35-6', '整形原紙/綿布'); D('屋内露出', '*Gw帯*＋整形原紙＋*', '35-6', '整形原紙/アルミガラスクロス');
+    D('屋内露出', 'Rw帯*＋亜鉛鉄板', '38-1', '亜鉛鉄板'); D('屋内露出', 'Rw帯*＋カラー鉄板', '38-1', 'カラー鉄板'); D('屋内露出', 'Rw帯*＋ガルバ*', '38-1', 'ガルバリウム鋼板'); D('屋内露出', 'Rw帯*＋*ステンレス*', '38-1', 'ステンレス鋼板');
+    D('屋内露出', 'ALK付Rw*＋カラー金網10m/m', '38-2', 'RWフェルト1号(ALK貼)/ALK粘着テープ/' + K10);
+    D('屋内露出', 'ALGC付Rw帯*＋*カラー金網10m/m', '38-2', 'RW帯1号(ALGC)/ALGC粘着テープ/' + K10); D('屋内露出', 'ALGC付Rw帯*＋ALGC粘着テープ', '38-2', 'RW帯1号(ALGC)/ALGC粘着テープ');
+    D('屋内露出', 'ALGC付Rwフェルト*＋カラー金網10m/m', '38-2', 'RW帯1号(ALGC)/ALGC粘着テープ/' + K10, '表はRW帯1号(ALGC)');
+    D('隠蔽', 'ALK付Gwロール32K＋*金網16m/m', '36-2', '(ALK貼)/AL粘着テープ/' + K16); D('隠蔽', 'ALW裏貼Gwロール32K＋*金網16m/m', '36-2', '(ALW貼)/ALW粘着テープ/' + K16);
+    D('隠蔽', 'ALGC付Gwロール32K＋*亀甲金網16m/m', '36-2', '(ALGC貼)/ALGC粘着テープ/' + K16);
+    D('隠蔽', 'ALK付Gwロール*＋亀甲金網16m/m', '36-1', '(ALK貼)/AL粘着テープ/' + K16); D('隠蔽', 'ALK付Gwロール*＋カラー金網*', '36-1', '(ALK貼)/AL粘着テープ/' + K16, M16);
+    D('隠蔽', 'ALW裏貼Gwロール*＋*金網16m/m', '36-1', '(ALW貼)/ALW粘着テープ/' + K16); D('隠蔽', 'ALGC付Gwロール*＋*亀甲金網16m/m', '36-1', '(ALGC貼)/ALGC粘着テープ/' + K16);
+    D('隠蔽', '*波形*＋*亀甲金網16m/m', '36-3', 'GW波形保温板40K(ALGC)/ALGC粘着テープ/' + K16); D('隠蔽', '*ウェーブ*＋*亀甲金網16m/m', '36-3', 'GW波形保温板40K(ALGC)/ALGC粘着テープ/' + K16);
+    D('隠蔽', '*波形*＋*ALGC粘着テープ', '36-3', 'GW波形保温板40K(ALGC)/ALGC粘着テープ'); D('隠蔽', '*ウェーブ*＋*ALGC粘着テープ', '36-3', 'GW波形保温板40K(ALGC)/ALGC粘着テープ');
+    D('隠蔽', 'ALGC付Gw帯*＋*亀甲金網16m/m', '36-3', 'GW帯40K(ALGC)/ALGC粘着テープ/' + K16); D('隠蔽', 'ALGC付Gw帯*＋ALGC粘着テープ', '36-3', 'GW帯40K(ALGC)/ALGC粘着テープ');
+    D('隠蔽', 'ALK付Rw*＋*金網16m/m', '39-1', 'RWフェルト1号(ALK貼)/ALK粘着テープ/' + K16); D('隠蔽', 'Rw帯*＋アルミガラスクロス*＋亀甲金網16m/m', '39-1', 'RW帯1号/アルミガラスクロス/' + K16);
+    D('隠蔽', 'Rw帯*＋亀甲金網16m/m', '39-1', 'RW帯1号/' + K16); D('隠蔽', 'ALGC付Rw*＋*亀甲金網16m/m', '39-2', 'ALGC粘着テープ/' + K16);
+    D('隠蔽', 'ALGC付Rw帯*＋ALGC粘着テープ', '39-2', 'ALGC粘着テープ'); D('隠蔽', 'ALGC付Rwフェルト*＋カラー金網*', '39-2', 'ALGC粘着テープ/' + K16, '表はRW帯1号(ALGC)＋亀甲金網16mm');
+    ['屋外露出', '多湿'].forEach(function (pl) {
+      D(pl, '*Gwロール*＋ポリ*＋カラー鉄板', '37-1', 'ポリエチレンフィルム/カラー鉄板'); D(pl, '*Gwロール*＋ポリ*＋ガルバ*', '37-1', 'ポリエチレンフィルム/ガルバリウム鋼板'); D(pl, '*Gwロール*＋ポリ*＋*ステンレス*', '37-1', 'ポリエチレンフィルム/ステンレス鋼板');
+      D(pl, '*Gw帯*＋ポリ*＋カラー鉄板', '37-2', 'ポリエチレンフィルム/カラー鉄板'); D(pl, '*Gw帯*＋ポリ*＋ガルバ*', '37-2', 'ポリエチレンフィルム/ガルバリウム鋼板'); D(pl, '*Gw帯*＋ポリ*＋*ステンレス*', '37-2', 'ポリエチレンフィルム/ステンレス鋼板');
+      D(pl, '*Rw*＋ポリ*＋カラー鉄板', '40-1', 'ポリエチレンフィルム/カラー鉄板'); D(pl, '*Rw*＋ポリ*＋ガルバ*', '40-1', 'ポリエチレンフィルム/ガルバリウム鋼板'); D(pl, '*Rw*＋ポリ*＋*ステンレス*', '40-1', 'ポリエチレンフィルム/ステンレス鋼板');
+    });
+    D('*', 'エアロフレックス*', '53-1', ''); D('*', 'アーマフレックス*', '53-2', '');
+    // --- 角ダクト・チャンバー（行は仕様の保温材＋保温厚） ---
+    function Q(place, pat, id, col, memo, row) { add('rect,box', '', place, pat, id, col, row || '自動', '', '', '', memo); }
+    [['亜鉛鉄板', '亜鉛鉄板'], ['カラー鉄板', 'カラー鉄板'], ['ガルバ*', 'ガルバニウム鋼板'], ['*ステンレス*', 'ステンレス板'], ['石膏ボード*', '石膏ボード(9mm)/アルミコーナー']].forEach(function (x) {
+      Q('屋内露出', '*板*＋鋼枠＋' + x[0], '31-1b', '鋲/保温板/鋼枠/' + x[1]);
+    });
+    [['亜鉛鉄板', '亜鉛鉄板'], ['カラー鉄板', 'カラー鉄板'], ['ガルバ*', 'ガルバニウム鋼板'], ['*ステンレス*', 'ステンレス板']].forEach(function (x) {
+      Q('屋内露出', '*板*＋' + x[0], '31-1', '鋲/保温板/' + x[1]);
+    });
+    Q('屋内露出', '*鋲＋*板*＋*寒冷紗*', '31-1', '鋲/保温板/角あて/目貼り/接着剤/寒冷紗'); Q('屋内露出', '*鋲＋*板*＋*アルミガラスクロス', '31-1', '鋲/保温板/角あて/目貼り/接着剤/アルミガラスクロス');
+    Q('屋内露出', '*鋲＋ALK*＋カラー金網10m/m*', '31-2', '鋲/保温材(ALK貼)/カラー亀甲金網10mm'); Q('屋内露出', '*鋲＋ALW*＋カラー金網10m/m*', '31-2', '鋲/保温材(ALW貼)/カラー亀甲金網10mm');
+    Q('屋内露出', '*鋲＋着色ALGC*＋着色ALGC粘着テープ*', '31-2', '鋲/保温板(着色ALGC貼)/アルミガラスクロス粘着テープ');
+    Q('屋内露出', '*鋲＋ALGC*＋ALGC粘着テープ＋*亀甲金網*', '31-2', '鋲/保温板(ALGC貼)/アルミガラスクロス粘着テープ/亀甲金網10mm');
+    Q('屋内露出', '*鋲＋ALGC*＋カラー金網10m/m*', '31-2', '鋲/保温材(ALGC貼)/カラー亀甲金網10mm');
+    Q('屋内露出', '*鋲＋ALGC*＋ALGC粘着テープ*', '31-2', '鋲/保温板(ALGC貼)/アルミガラスクロス粘着テープ');
+    Q('屋内露出', '*鋲＋ALK*＋*金網16m/m*', '31-2', '鋲/保温材(ALK貼)/カラー亀甲金網10mm', '露出の表はカラー亀甲金網10mm');
+    Q('隠蔽', '*鋲＋*接着剤＋アルミガラスクロス', '32-1', '鋲/保温材/接着剤/アルミガラスクロス');
+    Q('隠蔽', '*鋲＋ALGC*＋ALGC粘着テープ＋*亀甲金網16m/m', '32-1', '鋲/保温材(ALGC貼)/アルミガラスクロス粘着テープ/亀甲金網16mm');
+    Q('隠蔽', '*鋲＋ALGC*＋亀甲金網16m/m', '32-1', '鋲/保温材(ALGC貼)/アルミガラスクロス粘着テープ/亀甲金網16mm', '表はALGC粘着テープ＋亀甲金網16mm');
+    Q('隠蔽', '*鋲＋ALGC*＋ALGC粘着テープ*', '32-1', '鋲/保温材(ALGC貼)/アルミガラスクロス粘着テープ');
+    Q('隠蔽', '*鋲＋*アルミクラフト*＋亀甲金網16m/m', '32-1', '鋲/保温材/アルミクラフト紙/亀甲金網16mm');
+    Q('隠蔽', '*鋲＋ALK*＋亀甲金網16m/m', '32-1', '鋲/保温板(ALK貼)/亀甲金網16mm'); Q('隠蔽', '*鋲＋ALK*＋*金網*', '32-1', '鋲/保温板(ALK貼)/亀甲金網16mm', M16);
+    ['屋外露出', '多湿'].forEach(function (pl) {
+      [['カラー鉄板', 'カラー鉄板'], ['ガルバ*', 'ガルバ鋼板'], ['*ステンレス*', 'ステンレス板']].forEach(function (x) { Q(pl, '*鋲＋*ポリ*＋鋼枠＋' + x[0], '33-1', '鋲/保温材/ポリエチレンフィルム/鋼枠/' + x[1]); });
+      [['カラー鉄板', 'カラー鉄板'], ['ガルバ*', 'ガルバ鉄板'], ['*ステンレス*', 'ステンレス板']].forEach(function (x) { Q(pl, '*鋲＋*ポリ*＋' + x[0], '33-1', '鋲/保温材/ポリエチレンフィルム/' + x[1]); });
+    });
+    Q('内貼', '*GC*板*＋アルミパンチング*', '34-1', '保温板/ガラスクロス/アルミスパンシーティング0.6mm/絶縁座金付スポット鋲', '表はアルミスパンシーティング');
+    Q('内貼', '*GC*板*＋*銅亀甲金網*', '34-1', '鋲/保温板/ガラスクロス/鋼製亀甲金網10mm', '表は鋼製亀甲金網10mm');
+    Q('内貼', '*GC*板*＋*カラー金網10m/m', '34-1', '鋲/保温板/ガラスクロス/カラー亀甲金網10mm');
+    Q('内貼', '*GC*板*＋亀甲金網16m/m', '34-1', '鋲/保温板/ガラスクロス/亀甲金網16mm');
+    Q('内貼', '*GC*板*', '34-1', '鋲/保温板/ガラスクロス');
+    Q('*', 'エアロフレックス*', '52-1', '', '', '角ダクト'); Q('*', 'アーマフレックス*', '52-3', '', '', '角ダクト');
+    return R;
+  }
+  UA.skDefaultRules = skDefaultRules;
+  // 単価の加算・掛率（既定）[対象, 含む語, 加算(円), 掛率, メモ]
+  UA.skDefaultAdj = function () {
+    return [['仕様', 'ヒーター', 2000, '', 'ヒーター＋2,000円（取付費の行を別に立てるときは外す）'], ['仕様', '断熱鋲', 1500, '', '断熱鋲＋1,500円'], ['サイズ', 'BOX', 1000, '', 'BOX＋1,000円']];
+  };
+
+  function listOf(v) { return String(v == null ? '' : v).split(/[,、，]/).map(function (x) { return x.trim(); }).filter(Boolean); }
+  // 対応表の行（配列 or シートの行）を照合用に整える
+  UA.compileSkRules = function (rows) {
+    return rows.map(function (r, i) {
+      var items = listOf(r[0]), ds = listOf(r[1]);
+      return {
+        n: i + 1, items: items.length ? items : ['*'], ds: ds.map(likeRe), dsText: ds.join(','), place: trimAll(r[2]) || '*', pat: likeRe(r[3]), patText: String(r[3]),
+        id: trimAll(r[4]), col: String(r[5] == null ? '' : r[5]).trim(), row: String(r[6] == null ? '' : r[6]).trim(), over: trimAll(r[7]),
+        factor: num(r[8]) || 1, plus: num(r[9]) || 0, min: isEmpty(r[10]) ? null : num(r[10]), max: isEmpty(r[11]) ? null : num(r[11]), memo: String(r[12] == null ? '' : r[12]).trim()
+      };
+    }).filter(function (r) { return r.id && r.patText; });
+  };
+  UA.compileSkAdj = function (rows) {
+    return rows.map(function (r) { return { target: trimAll(r[0]) || '仕様', word: nk(r[1]), plus: num(r[2]) || 0, factor: num(r[3]) || 1, memo: String(r[4] == null ? '' : r[4]).trim() }; })
+      .filter(function (a) { return a.word && (a.plus || a.factor !== 1); });
+  };
+
+  // 施工箇所 → 積算資料の場所
+  UA.placeGroup = function (m, place) {
+    var p = (m && m.places || []).filter(function (x) { return x.name === place; })[0];
+    if (p && p.grp) return p.grp;
+    var t = String(place || '');
+    if (/ピット|床下|暗渠/.test(t)) return 'ピット';
+    if (/内貼/.test(t)) return '内貼';
+    if (/屋外|屋上/.test(t)) return '屋外露出';
+    if (/多湿|浴室/.test(t)) return '多湿';
+    if (/隠蔽/.test(t)) return '隠蔽';
+    if (/露出/.test(t)) return '屋内露出';
+    if (/天井|シャフト|PS|ライニング/.test(t)) return '隠蔽';
+    return '屋内露出';
+  };
+
+  function findRowBySize(tbl, size) {
+    var n = parseFloat(toHalf(size));
+    if (!isFinite(n)) return { i: -1 };
+    var maxN = 0, sqm = -1;
+    for (var i = 0; i < tbl.rows.length; i++) {
+      var lab = String(tbl.rows[i][0]).trim(), v = parseFloat(toHalf(lab));
+      if (/^(㎡|m2)$/.test(nk(lab))) { sqm = i; continue; }
+      if (isFinite(v) && Math.abs(v - n) < 1e-9 && /^[\d.]+$/.test(toHalf(lab))) return { i: i };
+      if (isFinite(v)) maxN = Math.max(maxN, v);
+    }
+    if (sqm >= 0 && n > maxN) return { i: sqm, area: Math.PI * n / 1000, sqm: true };
+    return { i: -1 };
+  }
+  function findRowByLabel(tbl, label, f) {
+    var want = nk(label), wantT = nk(label + f), i, lab;
+    for (i = 0; i < tbl.rows.length; i++) { lab = nk(tbl.rows[i][0]).replace(/mm$/, ''); if (lab === wantT) return { i: i, t: f }; }
+    for (i = 0; i < tbl.rows.length; i++) { lab = nk(tbl.rows[i][0]); if (lab === want) return { i: i, t: null }; }
+    return { i: -1 };
+  }
+  function findCol(tbl, colText, f) {
+    var cd = colDesc(tbl.cols), want = nk(colText), j, hit = -1;
+    if (want) for (j = 1; j < cd.length; j++) if (nk(cd[j].h) === want) return { j: j, c: cd[j] };
+    for (j = 1; j < cd.length; j++) {
+      if (nk(cd[j].fin) !== want) continue;
+      if (cd[j].t == null) return { j: j, c: cd[j] };
+      if (String(parseFloat(cd[j].t)) === String(parseFloat(f))) return { j: j, c: cd[j] };
+      if (hit < 0) hit = j;
+    }
+    return { j: -1, near: hit >= 0 ? cd[hit] : null };
+  }
+  function compText(tbl) {
+    return String(tbl.comp || '').replace(/^構成[:：]\s*/, '').split('/').map(function (x) { return x.trim().replace(/^\d+\./, ''); })
+      .filter(function (x) { return x && x.charAt(0) !== '※' && !/^厚み/.test(x); }).join('/');
+  }
+  function ceil10(x) { return Math.ceil(x / 10 - 1e-9) * 10; }
+  function fmtN(x) { return Math.round(x * 1e6) / 1e6; }
+
+  // 単価を引く。q = { item, d, place, spec, size, f }
+  // 戻り値 { p, formula, ref:{y,z,aa,ab}, id, approx, memo } / { p:null, why }
+  UA.skLook = function (sk, m, q, depth) {
+    if (!sk || !sk.tables) return { p: null, why: 'nofile' };
+    var rules = (m && m.skRules && m.skRules.length) ? m.skRules : (UA._skDef || (UA._skDef = UA.compileSkRules(skDefaultRules())));
+    var spec = nk(q.spec), pg = UA.placeGroup(m, q.place), item = q.item, d = nk(String(q.d || '').replace(/\(1\.6t\)$/, ''));
+    var f = thickKey(q.f), sizeN = parseFloat(toHalf(q.size)), firstWhy = null;
+    for (var k = 0; k < rules.length; k++) {
+      var r = rules[k];
+      if (r.items.indexOf('*') < 0 && r.items.indexOf(item) < 0) continue;
+      if (r.ds.length && !r.ds.some(function (re) { return re.test(d); })) continue;
+      if (r.place !== '*' && r.place !== pg) continue;
+      if (!r.pat.test(spec)) continue;
+      if (r.min != null && !(sizeN >= r.min)) continue;
+      if (r.max != null && !(sizeN <= r.max)) continue;
+      var res;
+      if (r.id === '配管') {
+        if (depth) continue;
+        res = UA.skLook(sk, m, { item: 'pipe', d: '', place: q.place, spec: q.spec, size: q.size, f: q.f }, 1);
+        if (res.p == null) { firstWhy = firstWhy || res.why; continue; }
+      } else {
+        res = cellOf(sk, r, q, f);
+        if (res.p == null) { firstWhy = firstWhy || res.why; continue; }
+      }
+      return finish(sk, m, q, r, res, depth);
+    }
+    return { p: null, why: firstWhy || 'nomatch' };
+  };
+  function cellOf(sk, r, q, f) {
+    var tbl = sk.tables[r.id];
+    if (!tbl) return { p: null, why: '表' + r.id + 'が資料にありません' };
+    var ri, mat = '', rowT = null;
+    if (r.row === '') ri = findRowBySize(tbl, q.size);
+    else {
+      mat = r.row === '自動' ? matLabel(q.spec) : r.row;
+      if (!mat) return { p: null, why: '保温材を読み取れません' };
+      ri = findRowByLabel(tbl, mat, f); rowT = ri.t;
+    }
+    if (ri.i < 0) return { p: null, why: '【' + r.id + '】に' + (mat ? mat + (f ? ' ' + f + 'mm' : '') : 'サイズ' + q.size) + 'の行がありません' };
+    var cj, colInfo = null;
+    if (r.col === '') {
+      cj = findCol(tbl, '', f);
+      if (cj.j < 0 && r.row !== '' && tbl.cols.length >= 2 && colDesc(tbl.cols).slice(1).every(function (c) { return c.t == null; })) cj = { j: 1, c: colDesc(tbl.cols)[1] };
+    } else cj = findCol(tbl, r.col, f);
+    if (cj.j < 0) return { p: null, why: '【' + r.id + '】に' + (r.col ? '「' + r.col + '」' : '') + (f ? f + 'mm' : '') + 'の列がありません' };
+    colInfo = cj.c;
+    var v = tbl.rows[ri.i][cj.j];
+    if (typeof v !== 'number') return { p: null, why: '【' + r.id + '】の' + (tbl.rows[ri.i][0]) + '・' + tbl.cols[cj.j] + 'は空欄です' };
+    var res = { p: v, base: v, tbl: tbl, rowLabel: String(tbl.rows[ri.i][0]), col: colInfo, area: ri.area || null, sqm: !!ri.sqm, rowT: rowT };
+    if (r.over) {
+      var t2 = sk.tables[r.over];
+      if (!t2) return { p: null, why: '表' + r.over + 'が資料にありません' };
+      var r2 = findRowBySize(t2, q.size), c2 = findCol(t2, '', f);
+      var v2 = (r2.i >= 0 && c2.j >= 0) ? t2.rows[r2.i][c2.j] : null;
+      if (typeof v2 !== 'number') return { p: null, why: '上被【' + r.over + '】に' + q.size + 'A・' + f + 'mmの単価がありません' };
+      res.over = { v: v2, tbl: t2 };
+    }
+    return res;
+  }
+  function finish(sk, m, q, r, res, depth) {
+    var notes = [], factor = 1, plus = 0;
+    // 掛率・加算（対応表の行）
+    if (r.factor !== 1) factor *= r.factor;
+    if (r.plus) { plus += r.plus; notes.push('＋' + yen(r.plus) + '円'); }
+    if (!depth) {
+      var adj = (m && m.skAdj && m.skAdj.length) ? m.skAdj : (UA._skAdj || (UA._skAdj = UA.compileSkAdj(UA.skDefaultAdj())));
+      var specRaw = nk(String(q.spec).replace(/ヒーター[＋+]/g, 'ヒーター　'));
+      adj.forEach(function (a) {
+        var tgt = a.target === 'サイズ' ? nk(q.size) : a.target === '種別' ? nk(q.d) : specRaw;
+        if (tgt.indexOf(a.word) < 0) return;
+        if (a.factor !== 1) { factor *= a.factor; notes.push('×' + a.factor + '（' + a.word + '）'); }
+        if (a.plus) { plus += a.plus; notes.push('＋' + yen(a.plus) + '円（' + a.word + '）'); }
+      });
+      var gf = (m && m.output && m.output.skFactor) || 1;
+      if (gf !== 1) { factor *= gf; notes.push('×' + gf + '（掛率）'); }
+    }
+    var base = res.base, expr, val;
+    if (r.id === '配管') {
+      // 配管の結果（数式または数値）に掛率をかける
+      expr = res.expr || String(res.p); val = res.p;
+      notes.unshift('×' + fmtN(r.factor) + '（' + (q.d || '弁') + '・配管の単価）');
+    } else {
+      expr = String(base); val = base;
+      if (res.over) { expr += '+' + res.over.v; val += res.over.v; }
+      if (res.area) { expr = '(' + expr + ')*PI()*' + fmtN(res.area / Math.PI); val = val * res.area; }
+    }
+    var needRound = !!res.area || factor !== 1;
+    if (factor !== 1 && r.id !== '配管') expr = '(' + expr + ')*' + fmtN(factor);
+    else if (r.id === '配管' && factor !== 1) expr = '(' + expr.replace(/^=/, '') + ')*' + fmtN(factor);
+    if (factor !== 1) val = val * factor;
+    if (needRound) { expr = 'ROUNDUP(' + expr + ',-1)'; val = ceil10(val); }
+    if (plus) { expr += '+' + plus; val += plus; }
+    var formula = /[+*()]/.test(expr) ? '=' + expr : null;
+    // 参照元の表示
+    var src = r.id === '配管' ? res.src : res;
+    var tbl = src.tbl, secT = sk.secs[tbl.sec] || '';
+    var memo = r.id !== '配管' ? r.memo : (res.memo || '');
+    var tFixed = fixedT(tbl, src.col), f = thickKey(q.f), approx = !!memo;
+    if (tFixed && f && String(parseFloat(f)) !== tFixed) { notes.push('※表は' + tFixed + 'mm'); approx = true; }
+    var showSec = secT && tbl.name.indexOf(secT) !== 0 && secT.indexOf(tbl.name) !== 0;
+    var y = '§' + tbl.sec + '【' + tbl.id + '】' + tbl.name + (showSec ? '　' + secT : '');
+    if (src.over) y += '＋§' + src.over.tbl.id + ' ' + src.over.tbl.name;
+    if (src.sqm) y += ' ㎡単価×π×φ';
+    if (notes.length) y += ' ' + notes.join(' ');
+    if (memo) y += ' ※' + memo;
+    if (sk.label) y += '（' + sk.label + '）';
+    var z = (src.col && src.col.fin) || compText(tbl) || tbl.name;
+    if (src.col && src.col.fin && src.col.fin.indexOf('×') < 0 && src.col.t == null) {
+      for (var jj = tbl.cols.indexOf(src.col.h) - 1; jj >= 1; jj--) { var mh = String(tbl.cols[jj]).match(/^(.*×\s*\d+\s*mm\S*)\s+\S+$/); if (mh) { z = mh[1] + ' ' + src.col.fin; break; } }
+    }
+    if (src.over) z += '＋' + compText(src.over.tbl);
+    if (r.row !== '' && r.id !== '配管') z += '／' + src.rowLabel;
+    var item = q.item, aa, ab;
+    if (item === 'rect' || item === 'box') aa = '（㎡単価）';
+    else if (item === 'round') aa = 'φ' + q.size + (src.sqm ? '（㎡行）' : '');
+    else aa = q.size + 'A';
+    ab = src.col && src.col.t ? src.col.t + 'mm' : src.rowT ? src.rowT + 'mm' : tFixed ? tFixed + 'mm' : (f ? f + 'mm' : '');
+    return { p: val, formula: formula, expr: expr, ref: { y: y, z: z, aa: aa, ab: ab }, id: tbl.id, approx: approx, memo: memo, src: src, rule: r.n };
+  }
 
   /* ========== 内訳シートの解析 ========== */
   // values/formulas: 1行目からの2次元配列（A列〜）。cols: 列の割当。
