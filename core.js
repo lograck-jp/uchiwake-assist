@@ -1033,14 +1033,24 @@
   };
 
   /* ========== 登録計画 ==========
-     sel = { area, newArea(bool), sys('' = 系統なし), place, spec, item, lines:[{d,e,f,g,h,i,src}], elbow:金額 }
+     sel = { area, newArea(bool), sys('' = 系統なし), place, spec, item, lines:[{d,e,f,g,h,i,src}], elbow:金額,
+             how: 'add'（今ある行は変えず、同じ塊の明細の下に追加。既定）| 'merge'（同じサイズの行は数量を足す）| 'row'（atRow 行目に入れる） }
      返り値 = { ok, mode, inserts:[{at, recs:[...]}], cellOps:[{row,col,value,prev}], totalOps:[...], final:[...] } */
   UA.plan = function (model, sel, m) {
     var res = { ok: false, mode: '', message: '' };
+    var how = sel.how === 'merge' || sel.how === 'row' ? sel.how : 'add';
+    res.how = how;
+    if (how === 'row') {
+      var ar = parseInt(toHalf(String(sel.atRow == null ? '' : sel.atRow)), 10);
+      if (!(ar > 0)) { res.message = '入れる行の番号を入れてください'; return res; }
+      if (ar < model.startRow) { res.message = model.startRow + '行目より上には入れられません'; return res; }
+      if (model.boundary && ar > model.boundary.row) { res.message = '「' + model.boundary.text + '」（' + model.boundary.row + '行目）より下には入れられません'; return res; }
+    }
     if (!sel.lines.length && !(sel.elbow > 0)) { res.message = '数量を入れると、ここに登録先が表示されます'; return res; }
     if (!sel.spec) { res.message = '仕様を選んでください'; return res; }
-    if (!sel.area) { res.message = '大項目を選ぶか、新しい大項目を入力してください'; return res; }
+    if (!sel.area && how !== 'row') { res.message = '大項目を選ぶか、新しい大項目を入力してください'; return res; }
     var base = model.recs.map(function (r) { return Object.assign({}, r); });
+    if (how === 'row') { var WR = planAtRow(model, base, sel, ar, res); return WR ? finishPlan(res, model, WR) : res; }
     // 末尾の目印（この行の上に差し込む）
     var endRow;
     if (model.boundary) {
@@ -1085,7 +1095,7 @@
       if (sr) {
         var sub = findSub(W, sr.s + (sel.sys ? 0 : 1), sr.e, sel.place, sel.spec);
         if (sub) {
-          insertIntoSub(W, sub, lines);
+          insertIntoSub(W, sub, lines, how === 'merge');
           res.mode = 'sub';
         } else {
           p = sr.e;
@@ -1111,7 +1121,55 @@
         res.mode = 'newsys';
       }
     }
+    return finishPlan(res, model, W);
+  };
 
+  // 行を指定して入れる（how = 'row'）。大項目・系統はその行の位置のもの。仕様が違えば仕様の行（括弧書き）も入れる
+  function planAtRow(model, base, sel, atRow, res) {
+    var endRow = model.boundary ? model.boundary.row : Math.max(model.lastContent + 1, model.startRow, atRow);
+    var W = base.concat([{ t: 'end', row: endRow }]);
+    var idx = W.length - 1, k;
+    for (k = 0; k < W.length; k++) if (W[k].row >= atRow) { idx = k; break; }
+    if (W[idx].t === 'end' && !model.boundary) W[idx].row = Math.max(W[idx].row, atRow);
+    // その位置の文脈（大項目・系統・施工箇所・仕様）
+    var cx = { area: '', sys: '', place: '', spec: null };
+    // 明細の最後より下に空きを空けて入れるときは、仕様の続きとはみなさない
+    var gap = W[idx].t === 'end' && idx > 0 && atRow > W[idx - 1].row + 1;
+    for (k = gap ? -1 : idx - 1; k >= 0; k--) {
+      var r = W[k], sp = specOfRec(r);
+      if (sp) { cx.spec = sp.e; break; }
+      if (r.t === 'line' || r.t === 'elbow' || r.t === 'other') continue;
+      break;
+    }
+    var placeFound = false;
+    for (k = idx - 1; k >= 0; k--) {
+      var r2 = W[k], s2 = specOfRec(r2);
+      if (!placeFound && s2 && s2.c) { cx.place = s2.c; placeFound = true; }
+      if (r2.t === 'sys' && !cx.sys) { cx.sys = r2.b; }
+      if (r2.t === 'area') { cx.area = r2.a; break; }
+    }
+    res.ctx = cx;
+    var lines = sel.lines.map(function (l) { return Object.assign({ t: 'line', isNew: true }, l); });
+    if (sel.item === 'pipe' && sel.elbow > 0) lines.push({ t: 'elbow', isNew: true, e: 'エルボ・チーズ', g: 1, h: '式', j: sel.elbow });
+    var samePlace = trimAll(cx.place) === trimAll(sel.place);
+    var needHead = cx.spec !== sel.spec || !samePlace;
+    var blk = lines.slice();
+    if (needHead) {
+      var head = { t: 'spec', isNew: true, c: samePlace ? '' : sel.place, d: '', e: sel.spec };
+      blk.unshift(head);
+      // 別の仕様の明細の途中に入れたときは、後ろの明細のために元の仕様の行を入れ直す
+      var nx = W[idx];
+      if (cx.spec && nx && (nx.t === 'line' || nx.t === 'elbow')) blk.push({ t: 'spec', isNew: true, c: head.c ? cx.place : '', d: '', e: cx.spec, restore: true });
+    }
+    res.headAdded = needHead;
+    Array.prototype.splice.apply(W, [idx, 0].concat(blk));
+    res.mode = 'row';
+    res.atRow = atRow;
+    return W;
+  }
+
+  function finishPlan(res, model, W) {
+    var i;
     // D列：同じ種別が続くときは最初の行だけ
     var cellOps = [];
     var prevLine = null;
@@ -1120,7 +1178,8 @@
       if (r.t !== 'line') { prevLine = null; continue; }
       var sameAsPrev = prevLine && prevLine.d === r.d;
       if (r.isNew) r.dShow = sameAsPrev ? '' : (r.d || '');
-      else if (sameAsPrev && r.dRaw && prevLine.isNew) cellOps.push({ row: r.row, col: 'd', value: '', prev: r.dRaw, why: 'D列の重複を整理' });
+      // 今ある行の D列を消すのは「数量を足す」のときだけ（ほかの入れ方では今ある行を一切変えない）
+      else if (res.how === 'merge' && sameAsPrev && r.dRaw && prevLine.isNew) cellOps.push({ row: r.row, col: 'd', value: '', prev: r.dRaw, why: 'D列の重複を整理' });
       prevLine = r;
     }
     // 数量・金額の加算
@@ -1212,12 +1271,29 @@
     // 挿入の目印になる行（場所を見る用）
     res.anchorRow = res.inserts.length ? res.inserts[res.inserts.length - 1].at : (merges[0] ? merges[0].row : null);
     return res;
-  };
+  }
 
-  function insertIntoSub(W, specRec, lines) {
+  // 同じ区分・仕様の塊に入れる。merge=true のときだけ、同じ種別・サイズ・厚みの行の数量（エルボは金額）に足す。
+  // merge=false（既定）は今ある行を変えず、同じ種別の明細の一番下（エルボはその下）に新しい行として入れる。
+  function insertIntoSub(W, specRec, lines, merge) {
     lines.forEach(function (ln) {
       var st = W.indexOf(specRec) + 1, en = st, k;
       while (en < W.length && (W[en].t === 'line' || W[en].t === 'elbow')) en++;
+      if (!merge) {
+        var pos2 = -1;
+        if (ln.t === 'elbow') {
+          for (k = st; k < en; k++) if (W[k].t === 'elbow') pos2 = k + 1;
+          if (pos2 < 0) { pos2 = en; for (k = st; k < en; k++) if (W[k].t === 'line' && W[k].d !== '') { pos2 = k; break; } }
+        } else {
+          for (k = st; k < en; k++) if (W[k].t === 'line' && W[k].d === ln.d) pos2 = k + 1;
+          if (pos2 < 0) {
+            pos2 = en;
+            if (ln.d === '') for (k = st; k < en; k++) if (W[k].t === 'elbow' || (W[k].t === 'line' && W[k].d !== '')) { pos2 = k; break; }
+          }
+        }
+        W.splice(pos2, 0, ln);
+        return;
+      }
       if (ln.t === 'elbow') {
         for (k = st; k < en; k++) if (W[k].t === 'elbow') { W[k].addJ = (W[k].addJ || 0) + ln.j; return; }
         var pe = en;

@@ -245,3 +245,14 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .ic-n { width: 26px; text-align: center; color: var(--faint); }
 .slft { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; }
 .slft .link { margin-left: 0; }
+
+/* v1.2.2 登録先の入れ方（下に追加・数量を足す・行を指定） */
+.howrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.howrow .lbl { font-size: 11px; color: var(--sub); }
+.howrow .seg { height: 26px; padding: 0 12px; font-size: 11.5px; }
+.atrow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11.5px; }
+.atrow .in { width: 64px; height: 28px; font-size: 13px; }
+.atrow .ghost.sm { align-self: center; border-style: solid; }
+.plan .hint { font-size: 10.5px; line-height: 1.5; color: var(--muted); }
+.plan.man { border-color: var(--acc); }
+.pr.mg { background: rgba(255, 196, 0, .16); }

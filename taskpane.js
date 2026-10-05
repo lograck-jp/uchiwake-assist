@@ -5,13 +5,14 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '1.2.1';
-  var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1';
+  var VERSION = '1.2.2';
+  var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1', K_UI = 'uchiwake-assist.ui.v1';
+  var HOW_LABEL = { add: '下に追加', merge: '数量を足す', row: '行を指定' };
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
 
   var st = {
     master: null, masterInfo: null, sk: null, skInfo: null, specLocal: { add: [], hide: {}, pin: {} }, siteType: '', AL: {}, sheets: [], target: '', model: null, headerOK: false, modelErr: '',
-    sel: freshSel(), ui: { specOpen: false, menu: false, busy: false, toast: null, composing: false, specEdit: null, showHidden: false, newSpec: '', newCat: '', newPlace: 'here', specIdx: [] },
+    sel: freshSel(), ui: { specOpen: false, menu: false, busy: false, toast: null, composing: false, specEdit: null, showHidden: false, newSpec: '', newCat: '', newPlace: 'here', specIdx: [], how: 'add', atRow: '' },
     undo: null, memo: { idx: {}, list: [] }, autoOpen: false, api19: false, api17: false, onChanged: null
   };
   function freshSel() {
@@ -41,6 +42,7 @@
     var sl = load(K_SPECS); if (sl && sl.add) st.specLocal = { add: sl.add || [], hide: sl.hide || {}, pin: sl.pin || {} };
     try { st.siteType = Office.context.document.settings.get('uchiwake.siteType') || ''; } catch (e) { /* noop */ }
     var skRaw = load(K_SK); if (skRaw && skRaw.sk && skRaw.sk.tables) { st.sk = skRaw.sk; st.skInfo = skRaw.info; }
+    var uiRaw = load(K_UI); if (uiRaw && (uiRaw.how === 'add' || uiRaw.how === 'merge')) st.ui.how = uiRaw.how;
     bindEvents();
     $('#masterFile').addEventListener('change', onMasterFile);
     $('#skFile').addEventListener('change', onSkFile);
@@ -328,7 +330,8 @@
   function currentPlan() {
     if (!st.master || !st.model) return null;
     var s = st.sel;
-    return UA.plan(st.model, { area: curAreaName(), areaRow: s.newArea ? null : s.areaRow, newArea: s.newArea, sys: s.sys, place: s.place, spec: s.spec, item: s.item, lines: buildLines(), elbow: s.item === 'pipe' ? U.num(s.elbow) : 0, totals: !!(st.master.output && st.master.output.makeTotals) }, st.master);
+    return UA.plan(st.model, { area: curAreaName(), areaRow: s.newArea ? null : s.areaRow, newArea: s.newArea, sys: s.sys, place: s.place, spec: s.spec, item: s.item, lines: buildLines(), elbow: s.item === 'pipe' ? U.num(s.elbow) : 0, totals: !!(st.master.output && st.master.output.makeTotals),
+      how: st.ui.how, atRow: st.ui.atRow }, st.master);
   }
 
   /* ---------- 登録（Excel への書き込み） ---------- */
@@ -399,8 +402,13 @@
         var s = st.sel;
         s.ent = {}; s.rq = ''; s.rf = undefined; s.ri = undefined; s.dims = [{ w: '', h: '', l: '' }]; s.elbow = ''; s.cmd = '';
         if (s.newArea) { s.pendingArea = curAreaName(); s.newArea = false; s.areaRow = null; }
-        var t = (p.addCount ? '明細' + p.addCount + '行を追加' : '') + (p.addCount && p.mergeCount ? '・' : '') + (p.mergeCount ? p.mergeCount + '行に加算' : '') +
-          'しました（' + (p.firstRow === p.lastRow ? p.firstRow + '行目' : p.firstRow + '〜' + p.lastRow + '行目') + '）';
+        // 行を指定して入れたときは、次はその続き（入れた明細のすぐ下）を指す
+        if (p.how === 'row') {
+          var lastLine = 0; p.news.forEach(function (x) { if ((x.t === 'line' || x.t === 'elbow') && x.finalRow > lastLine) lastLine = x.finalRow; });
+          if (lastLine) st.ui.atRow = String(lastLine + 1);
+        }
+        var t = (p.addCount ? '明細' + p.addCount + '行を追加' : '') + (p.addCount && p.mergeCount ? '・' : '') + (p.mergeCount ? p.mergeCount + '行の数量に加算' : '') +
+          'しました（' + (p.firstRow === p.lastRow ? p.firstRow + '行目' : p.firstRow + '〜' + p.lastRow + '行目') + '）' + (p.how === 'row' ? '。次は ' + st.ui.atRow + '行目に入れます' : '');
         return loadModel().then(function () {
           if (s.pendingArea) { var a = areas().filter(function (x) { return x.name === s.pendingArea; }).pop(); if (a) s.areaRow = a.row; delete s.pendingArea; normalizeSel(); }
           toast(t, 'ok', true);
@@ -460,10 +468,36 @@
     var jc = colsOf().j, a = p.firstRow, b = p.lastRow || p.firstRow;
     Excel.run(function (ctx) { ctx.workbook.worksheets.getItem(st.target).getRange('A' + a + ':' + jc + b).select(); return ctx.sync(); })
       .then(function () {
-        toast((a === b ? a + '行目' : a + '〜' + b + '行目') + 'に書き込みます' + (p.addCount ? '（今その位置にある行は下にずれます）' : '') + '。シートはまだ変わっていません。', 'info');
+        toast(planWords(p) + '。シートはまだ変わっていません。', 'info');
         render();
       })
       .catch(function (e) { toast(msg(e), 'err'); render(); });
+  }
+  // 登録で何が起きるかを文で（位置を確認・登録先の説明に使う）
+  function planWords(p) {
+    var newRows = p.news.map(function (x) { return x.finalRow; }).sort(function (x, y) { return x - y; });
+    var mg = p.merges.map(function (x) { return x.finalRow; });
+    var parts = [];
+    if (newRows.length) {
+      var top = newRows[0], bot = newRows[newRows.length - 1];
+      var first = p.inserts.length ? Math.min.apply(null, p.inserts.map(function (g) { return g.at; })) : top;
+      parts.push((top === bot ? top + '行目' : top + '〜' + bot + '行目') + 'に新しい行を入れます（今の' + first + '行目から下は下にずれます）');
+    }
+    if (mg.length) parts.push(mg.join('・') + '行目は数量を足します（今ある行の数量が変わります）');
+    return parts.join('。');
+  }
+  // Excel で選択しているセルの行を「行を指定」に使う（above=その行に入れる、below=その行の下に入れる）
+  function pickRow(below) {
+    Excel.run(function (ctx) {
+      var r = ctx.workbook.getSelectedRange(); r.load('rowIndex,rowCount');
+      var ws = r.worksheet; ws.load('name');
+      return ctx.sync().then(function () { return { top: r.rowIndex + 1, bottom: r.rowIndex + r.rowCount, sheet: ws.name }; });
+    }).then(function (o) {
+      if (o.sheet !== st.target) { toast('「' + st.target + '」のシートでセルを選んでから押してください（今は「' + o.sheet + '」）', 'warn'); render(); return; }
+      st.ui.how = 'row';
+      st.ui.atRow = String(below ? o.bottom + 1 : o.top);
+      render();
+    }).catch(function (e) { toast(msg(e), 'err'); render(); });
   }
   function setAutoOpen(on) {
     try {
@@ -817,12 +851,36 @@
     var ok = buildLines().length > 0;
     return '<section class="st">' + stepHead('05', k.series ? '保温厚・サイズ・数量' : '保温厚・数量', 'E・F・G・I列', ok) + h.join('') + (k.series && sel && sel.length ? '<div class="hint">数量の欄で Enter＝次のサイズへ、Ctrl＋Enter＝前のサイズへ</div>' : '') + '</section>';
   }
+  function planTitle(p) {
+    var s = st.sel, where = s.sys || curAreaName();
+    if (p.mode === 'row') {
+      var c = p.ctx || {}, cx = [c.area, c.sys, c.place ? '(' + c.place + ')' : ''].filter(Boolean).join('／');
+      return p.atRow + '行目に入れる' + (cx ? '（' + cx + ' の中）' : '') + (p.headAdded ? '・仕様の行も入れます' : '');
+    }
+    if (p.mode === 'sub') return p.how === 'merge' ? '同じ区分・仕様の塊（同じサイズは数量を足す）' : '同じ区分・仕様の明細の下に追加';
+    return p.mode === 'newsub' ? where + ' に新しい仕様の塊を作成' : p.mode === 'newsys' ? curAreaName() + ' に系統「' + s.sys + '」を作成' : '大項目「' + curAreaName() + '」を新しく作成';
+  }
+  // 登録先の入れ方（操作者が選ぶ）
+  function howView() {
+    var how = st.ui.how;
+    var h = '<div class="howrow"><span class="lbl">入れ方</span><div class="segs">' + ['add', 'merge', 'row'].map(function (k) {
+      return '<button type="button" class="seg' + (how === k ? ' on' : '') + '" data-act="how" data-v="' + k + '">' + HOW_LABEL[k] + '</button>';
+    }).join('') + '</div></div>';
+    if (how === 'row') {
+      h += '<div class="atrow"><input class="in num" data-f="atRow" inputmode="numeric" value="' + esc(st.ui.atRow) + '" aria-label="入れる行の番号"><span>行目に入れる</span>' +
+        '<button type="button" class="ghost sm" data-act="atSel" data-v="top" title="Excel で選んでいる行の位置に入れます（その行から下は下にずれます）">選択行に</button>' +
+        '<button type="button" class="ghost sm" data-act="atSel" data-v="below" title="Excel で選んでいる行のすぐ下に入れます">選択行の下に</button></div>';
+    }
+    var note = how === 'add' ? '今ある行は変えずに、同じ区分・仕様の明細の下へ新しい行で追加します。'
+      : how === 'merge' ? '同じ種別・サイズ・厚みの行があれば、その行の数量に足します（今ある行の数量が変わります）。'
+      : '指定した行に新しい行を入れます（その行から下は下にずれます）。大項目・系統はその位置のものになり、仕様が違うときは仕様の行も入れます。';
+    return h + '<div class="hint">' + note + '</div>';
+  }
   function planView() {
     var p = currentPlan();
     if (!p) return '';
-    if (!p.ok) return '<section class="plan"><div class="pt mute">' + esc(p.message) + '</div></section>';
-    var s = st.sel, where = s.sys || curAreaName();
-    var t = p.mode === 'sub' ? '同じ区分・仕様の塊に差し込み' : p.mode === 'newsub' ? where + ' に新しい仕様の塊を作成' : p.mode === 'newsys' ? curAreaName() + ' に系統「' + s.sys + '」を作成' : '大項目「' + curAreaName() + '」を新しく作成';
+    if (!p.ok) return '<section class="plan' + (st.ui.how === 'row' ? ' man' : '') + '"><div class="pt"><b>登録先</b></div>' + howView() + '<div class="pt mute">' + esc(p.message) + '</div></section>';
+    var t = planTitle(p);
     var rows = [];
     p.W.forEach(function (x) {
       if (!(x.isNew || x.addG || x.addJ)) return;
@@ -833,10 +891,11 @@
       else if (x.t === 'elbow') desc = 'エルボ・チーズ 1式　¥' + U.yen(x.isNew ? x.j : x.j + x.addJ) + (x.addJ ? '（＋' + U.yen(x.addJ) + '）' : '');
       else if (x.t === 'total') desc = x.label;
       else desc = '';
-      rows.push('<div class="pr' + (x.isNew ? '' : ' mg') + '"><span class="rn">' + x.finalRow + '</span><span class="pd">' + esc(desc) + '</span>' + (x.isNew ? '' : '<span class="tag">加算</span>') + '</div>');
+      var tag = !x.isNew ? '<span class="tag">数量を足す</span>' : x.restore ? '<span class="tag">元の仕様に戻す</span>' : '';
+      rows.push('<div class="pr' + (x.isNew ? '' : ' mg') + '"><span class="rn">' + x.finalRow + '</span><span class="pd">' + esc(desc) + '</span>' + tag + '</div>');
     });
-    return '<section class="plan"><div class="pt"><b>登録先</b>　' + esc(t) + '（' + (p.firstRow === p.lastRow ? p.firstRow + '行目' : p.firstRow + '〜' + p.lastRow + '行目') + '）</div>' +
-      '<div class="prs">' + rows.join('') + '</div></section>';
+    return '<section class="plan' + (st.ui.how === 'row' ? ' man' : '') + '"><div class="pt"><b>登録先</b>　' + esc(t) + '（' + (p.firstRow === p.lastRow ? p.firstRow + '行目' : p.firstRow + '〜' + p.lastRow + '行目') + '）</div>' +
+      howView() + '<div class="prs">' + rows.join('') + '</div></section>';
   }
   function footView() {
     var p = currentPlan(), ok = p && p.ok && st.headerOK;
@@ -958,6 +1017,18 @@
           }
           break;
         }
+        case 'how': {
+          if (v === 'row' && !st.ui.atRow) {
+            // はじめて「行を指定」にしたときは、自動で入れる位置を初期値にする
+            var auto = st.ui.how; st.ui.how = 'add';
+            var pa = currentPlan(); st.ui.how = auto;
+            if (pa && pa.ok && pa.news.length) st.ui.atRow = String(Math.min.apply(null, pa.news.map(function (x) { return x.finalRow; })));
+          }
+          st.ui.how = v;
+          if (v !== 'row') save(K_UI, { how: v });
+          break;
+        }
+        case 'atSel': pickRow(v === 'below'); return;
         case 'register': register(); return;
         case 'locate': locate(); return;
         case 'undo': undoLast(); return;
@@ -1004,6 +1075,7 @@
     if (f === 'cmd') { s.cmd = v; if (!silent) onCmd(v); }
     else if (f === 'newAreaName') { s.newAreaName = stripNum(v); if (!silent) normalizeSel({ specAuto: true }); }
     else if (f === 'elbow') s.elbow = v;
+    else if (f === 'atRow') st.ui.atRow = v;
     else if (f === 'custom') { s.custom = v; if (!silent) normalizeSel(v ? { spec: U.normSpec(v), specAuto: false } : { specAuto: true }); }
     else if (f === 'specNew') { st.ui.newSpec = v; }
     else if (f === 'specEditText') { if (st.ui.specEdit) st.ui.specEdit.spec = v; return; }
