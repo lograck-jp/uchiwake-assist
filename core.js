@@ -127,7 +127,7 @@
       var s = normSpec(pick(r, '仕様'));
       if (!s) return;
       var pl = trimAll(stripParen(pick(r, '施工箇所')));
-      m.specs.push({ kind: str(pick(r, '仕様区分')) || '共通', place: pl || '（全箇所）', spec: s, prio: num(pick(r, '優先順位')) || 0, use: useOK(pick(r, '使用する')), src: str(pick(r, '由来')) });
+      m.specs.push({ kind: str(pick(r, '仕様区分')) || '共通', place: pl || '（全箇所）', spec: s, prio: num(pick(r, '優先順位')) || 0, use: useOK(pick(r, '使用する')), src: str(pick(r, '由来')), cat: trimAll(pick(r, '区分')) });
     });
 
     rows('M_単価履歴').forEach(function (r) {
@@ -151,7 +151,7 @@
     var cols = { area: 'A', sys: 'B', place: 'C', d: 'D', spec: 'E', size: 'E', f: 'F', g: 'G', h: 'H', i: 'I', j: 'J', label: 'I' };
     var refCols = { y: 'Y', z: 'Z', aa: 'AA', ab: 'AB' };
     var REFKEY = { '単価の参照元': 'y', '参照した仕様': 'z', '参照したサイズ': 'aa', '参照した厚み': 'ab' };
-    var out = { cols: cols, refCols: refCols, priceSrc: '保温積算資料', skFactor: 1, startRow: 5, amountTpl: '=IF(AND(G{行}<>"",I{行}=""),0,IF(AND(G{行}="",I{行}=""),"",IF(AND(G{行}<>"",I{行}<>""),G{行}*I{行},"")))' };
+    var out = { cols: cols, refCols: refCols, priceSrc: '保温積算資料', skFactor: 1, makeTotals: false, thickList: ['20', '25', '30', '40', '50', '65', '75'], startRow: 5, amountTpl: '=IF(AND(G{行}<>"",I{行}=""),0,IF(AND(G{行}="",I{行}=""),"",IF(AND(G{行}<>"",I{行}<>""),G{行}*I{行},"")))' };
     var MAPKEY = { '大項目': 'area', '系統': 'sys', '施工箇所': 'place', '種別': 'd', '仕様': 'spec', 'サイズ': 'size', '保温厚': 'f', '数量': 'g', '単位': 'h', '単価': 'i', '金額': 'j', '系統計（ラベル）': 'label' };
     (sheets['M_出力設定'] || []).forEach(function (r) {
       var k = str(pick(r, '項目')), c = trimAll(pick(r, '列')), v = str(pick(r, '書き込む内容'));
@@ -160,6 +160,8 @@
       if (MAPKEY[k] && /^[A-Za-z]{1,2}$/.test(c)) cols[MAPKEY[k]] = c.toUpperCase();
       if (REFKEY[k]) refCols[REFKEY[k]] = /^[A-Za-z]{1,3}$/.test(c) ? c.toUpperCase() : '';
       if (k === '単価の取り方' && v) out.priceSrc = v;
+      if (k === '計の行を作る') out.makeTotals = /する|○/.test(v) && !/しない/.test(v);
+      if (k === '保温厚の候補' && v) out.thickList = String(v).split(/[、,，\s]+/).map(function (x) { return thickKey(x); }).filter(Boolean);
       if (k === '保温積算資料の掛率' && num(v) > 0) out.skFactor = num(v);
     });
     // 保温積算資料の対応表・加算（シートがあればそれを使う。無ければ既定）
@@ -268,6 +270,111 @@
     });
     list.forEach(function (s) { if (!seen[s.spec]) { seen[s.spec] = 1; out.push(s); } });
     return out;
+  };
+
+  // この見積書（内訳シート）で使っている仕様の一覧
+  UA.sheetSpecs = function (model) {
+    var out = [], idx = {}, fam = 'pipe', place = '';
+    if (!model) return out;
+    model.recs.forEach(function (r) {
+      if (r.t === 'area') { fam = famOfArea(r.a); place = ''; return; }
+      if (r.t === 'sys') place = '';
+      if ((r.t === 'spec' || r.t === 'sys') && r.e) {
+        if (r.c) place = r.c;
+        var key = fam + '|' + place + '|' + r.e;
+        if (!idx[key]) { idx[key] = { spec: r.e, place: place, fam: fam, n: 0, rows: [] }; out.push(idx[key]); }
+        idx[key].n++; idx[key].rows.push(r.row);
+      }
+    });
+    return out;
+  };
+  // 仕様を「保温材」「表面材（貼）」「仕上げ」「目印」に分ける（画面で見やすく並べるため）
+  var MAT_RE = /(Gw|Rw|PF|FP|ＧＷ|ＲＷ|グラスウール|ロックウール|ポリスチレンフォーム|フェノールフォーム|アクリア)[^＋+]*?(筒|ロール|帯|板|フェルト|ブランケット|保温材)|エアロフレックス|アーマフレックス|ウェーブロール|波形[^＋+]*板/;
+  function matFam(t) {
+    if (/Gw|ＧＷ|グラスウール|アクリア|ウェーブ|波形/.test(t)) return 'GW';
+    if (/Rw|ＲＷ|ロックウール/.test(t)) return 'RW';
+    if (/PF|ポリスチレン/.test(t)) return 'PF';
+    if (/FP|フェノール/.test(t)) return 'FP';
+    if (/エアロ|アーマ/.test(t)) return 'ゴム';
+    return '';
+  }
+  UA.specParts = function (spec) {
+    var res = { pre: [], facing: '', mat: '', fam: '', rest: [], tags: [] };
+    String(spec || '').split(/[＋+]/).map(function (x) { return x.trim(); }).filter(Boolean).forEach(function (p) {
+      if (/^ヒーター/.test(p)) { res.tags.push('ヒーター'); return; }
+      if (p === '断熱鋲') { res.tags.push('断熱鋲'); return; }
+      if (p === '鋲') { res.pre.push('鋲'); return; }
+      var m = p.match(MAT_RE);
+      if (m && !res.mat) { res.facing = p.slice(0, m.index); res.mat = p.slice(m.index); res.fam = matFam(res.mat); return; }
+      if (m && res.mat) { if (res.tags.indexOf('2層') < 0) res.tags.push('2層'); res.rest.push(p); return; }
+      if (/サンダム|遮音/.test(p)) { res.tags.push('遮音'); res.rest.push(p); return; }
+      res.rest.push(p);
+    });
+    if (!res.mat && res.rest.length) { res.mat = res.rest.shift(); res.fam = matFam(res.mat); }
+    return res;
+  };
+  // 仕様の候補（グループ分け）
+  //  opt = { item, place, fam, sheet:[sheetSpecs], cur:現在の塊の仕様, cat:'民間'|'官庁'|'', local:{add,hide,pin}, showHidden }
+  UA.specKey = function (kind, place, spec) { return kind + '|' + place + '|' + spec; };
+  UA.specList = function (m, opt) {
+    var kind = KIND_OF_ITEM[opt.item] || opt.item, place = opt.place, local = opt.local || { add: [], hide: {}, pin: {} };
+    var seen = {}, groups = [];
+    function catOK(c) { return !c || !opt.cat || c === opt.cat; }
+    function cnt(spec, here) { return here ? (m.specCount[kind + '|' + place + '|' + spec] || 0) : (m.specCount[kind + '|*|' + spec] || 0); }
+    // 1) この見積書で使用中（同じ配管/ダクトの区分）。今の塊 → 同じ施工箇所 → ほかの施工箇所
+    var sh = (opt.sheet || []).filter(function (x) { return x.fam === opt.fam; });
+    sh.sort(function (a, b) {
+      var ca = a.spec === opt.cur ? 0 : a.place === place ? 1 : 2, cb = b.spec === opt.cur ? 0 : b.place === place ? 1 : 2;
+      return ca - cb || b.n - a.n;
+    });
+    var g1 = [], g1b = [];
+    sh.forEach(function (x) {
+      if (seen[x.spec]) return; seen[x.spec] = 1;
+      var it = { spec: x.spec, sheet: true, cur: x.spec === opt.cur, place: x.place, n: x.n, here: x.place === place };
+      (it.cur || it.here ? g1 : g1b).push(it);
+    });
+    if (g1.length) groups.push({ key: 'sheet', title: 'この見積書で使用中（' + place + '）', items: g1 });
+    // 候補（マスタ＋このパソコンで追加）
+    var cands = [];
+    m.specs.forEach(function (s) {
+      if (!s.use || !(s.kind === kind || s.kind === '共通')) return;
+      if (!(s.place === place || s.place === '（全箇所）')) return;
+      if (!catOK(s.cat)) return;
+      cands.push({ spec: s.spec, kind: s.kind, place: s.place, cat: s.cat, prio: s.prio, src: 'master' });
+    });
+    (local.add || []).forEach(function (a) {
+      if (!(a.kind === kind || a.kind === '共通')) return;
+      if (!(a.place === place || a.place === '（全箇所）')) return;
+      if (!catOK(a.cat)) return;
+      cands.push({ spec: a.spec, kind: a.kind, place: a.place, cat: a.cat, prio: 0, src: 'local', id: a.id });
+    });
+    var hidden = [];
+    cands = cands.filter(function (c) {
+      c.key = UA.specKey(c.kind, c.place, c.spec);
+      c.here = c.place === place; c.n = cnt(c.spec, c.here); c.pin = !!(local.pin || {})[c.key];
+      if ((local.hide || {})[c.key]) { hidden.push(c); return false; }
+      return true;
+    });
+    cands.sort(function (a, b) {
+      if (a.pin !== b.pin) return a.pin ? -1 : 1;
+      var pa = a.prio > 0 ? a.prio : 9999, pb = b.prio > 0 ? b.prio : 9999;
+      if (pa !== pb) return pa - pb;
+      if (a.here !== b.here) return a.here ? -1 : 1;
+      if (a.src !== b.src) return a.src === 'local' ? -1 : 1;
+      return b.n - a.n;
+    });
+    var g2 = [], g3 = [];
+    cands.forEach(function (c) {
+      if (seen[c.spec]) return;
+      seen[c.spec] = 1;
+      (c.here || c.pin ? g2 : g3).push(c);
+    });
+    if (g2.length) groups.push({ key: 'place', title: place + 'の候補', items: g2 });
+    if (g1b.length) groups.push({ key: 'sheet', title: 'この見積書で使用中（ほかの施工箇所）', items: g1b });
+    if (g3.length) groups.push({ key: 'all', title: '全箇所の候補', items: g3 });
+    if (opt.showHidden && hidden.length) groups.push({ key: 'hidden', title: '非表示にした候補', items: hidden });
+    groups.hiddenCount = hidden.length;
+    return groups;
   };
 
   // 表記統一
@@ -965,9 +1072,11 @@
       if (sel.sys) block.push(nb('sys', { b: sel.sys }));
       block.push(nb('spec', { c: sel.place, d: '', e: sel.spec }));
       block = block.concat(lines);
-      block.push(nb('blank'));
-      if (sel.sys) { sysTotal = nb('total', { scope: 'sys', label: sel.sys + '　計', name: sel.sys }); block.push(sysTotal); block.push(nb('blank')); }
-      block.push(nb('total', { scope: 'area', label: sel.area + '　計', name: sel.area, sysTotalRef: sysTotal }));
+      if (sel.totals) {
+        block.push(nb('blank'));
+        if (sel.sys) { sysTotal = nb('total', { scope: 'sys', label: sel.sys + '　計', name: sel.sys }); block.push(sysTotal); block.push(nb('blank')); }
+        block.push(nb('total', { scope: 'area', label: sel.area + '　計', name: sel.area, sysTotalRef: sysTotal }));
+      }
       splice(p, block);
       res.mode = 'newarea';
     } else {
@@ -997,7 +1106,7 @@
         while (p - 1 > ai && W[p - 1].t === 'blank') p--;
         var sb = [nb('sys', { b: sel.sys }), nb('spec', { c: sel.place, d: '', e: sel.spec })].concat(lines);
         if (p > ai + 1) sb.unshift(nb('blank'));
-        if (useSysTotal) { sb.push(nb('blank')); sb.push(nb('total', { scope: 'sys', label: sel.sys + '　計', name: sel.sys, newSys: true })); }
+        if (useSysTotal && sel.totals) { sb.push(nb('blank')); sb.push(nb('total', { scope: 'sys', label: sel.sys + '　計', name: sel.sys, newSys: true })); }
         splice(p, sb);
         res.mode = 'newsys';
       }

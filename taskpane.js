@@ -5,17 +5,17 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '1.1.0';
-  var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1', K_SK = 'uchiwake-assist.sekisan.v1';
+  var VERSION = '1.2.0';
+  var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
 
   var st = {
-    master: null, masterInfo: null, sk: null, skInfo: null, AL: {}, sheets: [], target: '', model: null, headerOK: false, modelErr: '',
-    sel: freshSel(), ui: { specOpen: false, menu: false, busy: false, toast: null, composing: false },
+    master: null, masterInfo: null, sk: null, skInfo: null, specLocal: { add: [], hide: {}, pin: {} }, siteType: '', AL: {}, sheets: [], target: '', model: null, headerOK: false, modelErr: '',
+    sel: freshSel(), ui: { specOpen: false, menu: false, busy: false, toast: null, composing: false, specEdit: null, showHidden: false, newSpec: '', newCat: '', newPlace: 'here', specIdx: [] },
     undo: null, memo: { idx: {}, list: [] }, autoOpen: false, api19: false, api17: false, onChanged: null
   };
   function freshSel() {
-    return { areaRow: null, area: '', newArea: false, newAreaName: '', sys: '', place: '', item: 'pipe', sub: '', t16: false,
+    return { areaRow: null, area: '', newArea: false, newAreaName: '', sys: '', place: '', item: 'pipe', sub: '', t16: false, tSel: '',
       spec: '', specAuto: true, custom: '', ent: {}, rq: '', rf: undefined, ri: undefined, dims: [{ w: '', h: '', l: '' }], elbow: '', cmd: '' };
   }
 
@@ -38,6 +38,8 @@
     var raw = load(K_MASTER);
     if (raw && raw.master) { setMaster(raw.master, raw.info, false); }
     var memo = load(K_MEMO); if (memo && memo.idx) st.memo = memo;
+    var sl = load(K_SPECS); if (sl && sl.add) st.specLocal = { add: sl.add || [], hide: sl.hide || {}, pin: sl.pin || {} };
+    try { st.siteType = Office.context.document.settings.get('uchiwake.siteType') || ''; } catch (e) { /* noop */ }
     var skRaw = load(K_SK); if (skRaw && skRaw.sk && skRaw.sk.tables) { st.sk = skRaw.sk; st.skInfo = skRaw.info; }
     bindEvents();
     $('#masterFile').addEventListener('change', onMasterFile);
@@ -213,7 +215,10 @@
   function kind() { return st.master && st.master.kindById[st.sel.item]; }
   function subsOf(item) { return st.master ? (st.master.subs[item] || []).filter(function (s) { return s.use; }) : []; }
   function areas() { return st.model ? UA.areasOf(st.model) : []; }
-  function curAreaName() { var s = st.sel; if (s.newArea) return s.newAreaName; var a = areas().filter(function (x) { return x.row === s.areaRow; })[0]; return a ? a.name : ''; }
+  function curAreaName() { var s = st.sel; if (s.newArea) return areaNumNext() + '.' + stripNum(s.newAreaName); var a = areas().filter(function (x) { return x.row === s.areaRow; })[0]; return a ? a.name : ''; }
+  // 大項目の番号は自動（シート上の最大の番号＋1）
+  function areaNumNext() { var n = 0; areas().forEach(function (a) { var mm = U.toHalf(a.name).match(/^\s*(\d+)\s*[.．、]/); if (mm) n = Math.max(n, +mm[1]); }); return n + 1; }
+  function stripNum(t) { return String(t == null ? '' : t).replace(/^\s*[0-9０-９]+\s*[.．、]\s*/, ''); }
   function famOfSel() { var n = curAreaName(); if (n) return UA.famOfArea(n); var k = kind(); return k ? k.fam : 'pipe'; }
   function sysList() {
     var s = st.sel, fam = famOfSel(), out = [];
@@ -225,11 +230,7 @@
     return out;
   }
   function placeList() { return st.master ? st.master.places.filter(function (p) { return p.use; }).map(function (p) { return p.name; }) : []; }
-  function nextAreaName(fam) {
-    var list = areas(), n = 0;
-    list.forEach(function (a) { var mm = U.toHalf(a.name).match(/^(\d+)\./); if (mm) n = Math.max(n, +mm[1]); });
-    return (n + 1) + '.' + (fam === 'duct' ? 'ダクト設備' : '配管設備');
-  }
+  function nextAreaName(fam) { return fam === 'duct' ? 'ダクト設備' : '配管設備'; }
   function defaultSub(item) {
     var subs = subsOf(item);
     if (!subs.length) return '';
@@ -245,7 +246,7 @@
       if (!patch || !('sub' in patch)) s.sub = defaultSub(s.item);
       if (!patch || !('ent' in patch)) s.ent = {};
       if (!patch || !('rq' in patch)) s.rq = '';
-      s.dims = [{ w: '', h: '', l: '' }]; s.elbow = ''; if (!patch || !('t16' in patch)) s.t16 = false;
+      s.dims = [{ w: '', h: '', l: '' }]; s.elbow = ''; if (!patch || !('t16' in patch)) s.t16 = false; if (!patch || !('tSel' in patch)) s.tSel = '';
       var kf = kind() ? kind().fam : 'pipe';
       if ((!patch || (!('areaRow' in patch) && !('newArea' in patch))) && famOfSel() !== kf) {
         var alt = areas().filter(function (a) { return UA.famOfArea(a.name) === kf; })[0];
@@ -267,7 +268,7 @@
     if (pl.indexOf(s.place) < 0) s.place = pl[0] || '';
     if (s.specAuto || !s.spec) { s.spec = autoSpec(); if (!s.custom) s.specAuto = true; }
     if (s.spec !== prev.spec || s.sub !== prev.sub || s.item !== prev.item || s.t16 !== prev.t16) {
-      var e2 = {}; Object.keys(s.ent).forEach(function (k) { e2[k] = { g: s.ent[k].g }; }); s.ent = e2; s.rf = undefined; s.ri = undefined;
+      var e2 = {}; Object.keys(s.ent).forEach(function (k) { e2[k] = { g: s.ent[k].g }; if (s.tSel) e2[k].f = s.tSel; }); s.ent = e2; s.rf = s.tSel || undefined; s.ri = undefined;
     }
   }
   function sheetSpec() {
@@ -275,9 +276,17 @@
     if (!st.model || s.newArea) return null;
     return UA.specInSheet(st.model, st.master, curAreaName(), s.areaRow, s.sys, s.place, s.item, dOf());
   }
+  function specGroups() {
+    var s = st.sel;
+    return UA.specList(st.master, { item: s.item, place: s.place, fam: kind() ? kind().fam : 'pipe', sheet: st.model ? UA.sheetSpecs(st.model) : [], cur: sheetSpec(), cat: st.siteType, local: st.specLocal, showHidden: st.ui.showHidden });
+  }
+  // 自動で選ぶ仕様：今の塊 → この見積の同じ施工箇所 → 候補（固定・この施工箇所） → その他
   function autoSpec() {
-    var o = UA.specOptions(st.master, st.sel.item, st.sel.place, sheetSpec());
-    return o.length ? o[0].spec : (st.sel.spec || '');
+    var all = [];
+    specGroups().forEach(function (g) { if (g.key !== 'hidden') all = all.concat(g.items); });
+    var pick = all.filter(function (x) { return x.cur; })[0] || all.filter(function (x) { return x.sheet && x.here; })[0] ||
+      all.filter(function (x) { return !x.sheet && (x.here || x.pin); })[0] || all.filter(function (x) { return !x.sheet; })[0] || all[0];
+    return pick ? pick.spec : (st.sel.spec || '');
   }
   function dOf() {
     var s = st.sel, d = '';
@@ -319,7 +328,7 @@
   function currentPlan() {
     if (!st.master || !st.model) return null;
     var s = st.sel;
-    return UA.plan(st.model, { area: curAreaName(), areaRow: s.newArea ? null : s.areaRow, newArea: s.newArea, sys: s.sys, place: s.place, spec: s.spec, item: s.item, lines: buildLines(), elbow: s.item === 'pipe' ? U.num(s.elbow) : 0 }, st.master);
+    return UA.plan(st.model, { area: curAreaName(), areaRow: s.newArea ? null : s.areaRow, newArea: s.newArea, sys: s.sys, place: s.place, spec: s.spec, item: s.item, lines: buildLines(), elbow: s.item === 'pipe' ? U.num(s.elbow) : 0, totals: !!(st.master.output && st.master.output.makeTotals) }, st.master);
   }
 
   /* ---------- 登録（Excel への書き込み） ---------- */
@@ -365,6 +374,9 @@
             rg.formulas = [rowArray(x, r, cols, maxCol, tpl)];
             // 単価の参照元（Y〜AB列）
             if (x.t === 'line' && x.ref) rk.forEach(function (k) { ws.getRange(rc[k] + r).values = [[x.ref[k] == null ? '' : x.ref[k]]]; });
+            // 仕様（括弧書き）は左揃え、サイズは右揃え（コピーした書式に左右されないように）
+            if (x.t === 'spec') ws.getRange(cols.spec + r).format.horizontalAlignment = 'Left';
+            if (x.t === 'line') ws.getRange(cols.size + r).format.horizontalAlignment = 'Right';
           });
           p.totalOps.forEach(function (op) { if (op.type === 'set') ws.getRange(jc + op.finalRow).formulas = [[op.formula]]; });
           var appends = p.totalOps.filter(function (op) { return op.type === 'append'; }).map(function (op) {
@@ -386,7 +398,7 @@
         st.undo = undo;
         var s = st.sel;
         s.ent = {}; s.rq = ''; s.rf = undefined; s.ri = undefined; s.dims = [{ w: '', h: '', l: '' }]; s.elbow = ''; s.cmd = '';
-        if (s.newArea) { s.newArea = false; s.areaRow = null; s.pendingArea = curAreaName(); }
+        if (s.newArea) { s.pendingArea = curAreaName(); s.newArea = false; s.areaRow = null; }
         var t = (p.addCount ? '明細' + p.addCount + '行を追加' : '') + (p.addCount && p.mergeCount ? '・' : '') + (p.mergeCount ? p.mergeCount + '行に加算' : '') +
           'しました（' + (p.firstRow === p.lastRow ? p.firstRow + '行目' : p.firstRow + '〜' + p.lastRow + '行目') + '）';
         return loadModel().then(function () {
@@ -475,6 +487,28 @@
         return ctx.sync();
       });
     }).then(function () { toast('「' + name + '」シートに書き出しました。2行目以降を設定マスタの M_単価履歴 の下に貼り付けてください。', 'ok'); render(); })
+      .catch(function (e) { toast(msg(e), 'err'); render(); });
+  }
+
+  // このパソコンで変えた仕様候補を、設定マスタ（M_仕様候補）へ移すための一覧に書き出す
+  function exportSpecs() {
+    var L = st.specLocal, rows = [];
+    L.add.forEach(function (a) { rows.push(['追加', a.kind, a.place, a.spec, a.cat || '', a.from ? '「' + a.from + '」を直したもの' : '']); });
+    Object.keys(L.hide).forEach(function (k) { var p = k.split('|'); rows.push(['候補から外す', p[0], p[1], p.slice(2).join('|'), '', '設定マスタの「使用する」を × に']); });
+    Object.keys(L.pin).forEach(function (k) { var p = k.split('|'); rows.push(['固定', p[0], p[1], p.slice(2).join('|'), '', '設定マスタの「優先順位」に 1 など']); });
+    if (!rows.length) { toast('仕様候補の変更はまだありません', 'warn'); render(); return; }
+    var name = '内訳アシスト_仕様候補';
+    Excel.run(function (ctx) {
+      var ws = ctx.workbook.worksheets.getItemOrNullObject(name);
+      return ctx.sync().then(function () {
+        if (ws.isNullObject) ws = ctx.workbook.worksheets.add(name); else ws.getRange().clear();
+        ws.getRange('A1:F1').values = [['操作', '仕様区分', '施工箇所', '仕様（括弧なし）', '区分（民間・官庁）', 'メモ']];
+        ws.getRange('A1:F1').format.font.bold = true;
+        ws.getRange('A2:F' + (rows.length + 1)).values = rows;
+        ws.activate();
+        return ctx.sync();
+      });
+    }).then(function () { toast('「' + name + '」シートに書き出しました。「追加」の行は設定マスタの M_仕様候補 に貼り付けると、ほかのパソコンでも使えます。', 'ok'); render(); })
       .catch(function (e) { toast(msg(e), 'err'); render(); });
   }
 
@@ -577,6 +611,7 @@
       '<button type="button" data-act="reload">シートを読み直す</button>' +
       '<button type="button" data-act="autoOpen">' + (st.autoOpen ? '✓ ' : '') + 'このブックを開いたら自動で表示</button>' +
       '<button type="button" data-act="exportMemo">手入力した単価を書き出す（' + st.memo.list.length + '件）</button>' +
+      '<button type="button" data-act="exportSpecs">仕様候補の変更を書き出す（' + (st.specLocal.add.length + Object.keys(st.specLocal.hide).length + Object.keys(st.specLocal.pin).length) + '件）</button>' +
       '<div class="ver">内訳アシスト v' + VERSION + '／Excel API ' + (st.api19 ? '1.9以上' : st.api17 ? '1.7以上' : '1.7未満') + '</div></div>';
   }
   function onboard() {
@@ -605,7 +640,7 @@
     var s = st.sel, al = areas();
     var ah = al.map(function (a) { return chip('area', a.row, a.label, !s.newArea && a.row === s.areaRow); }).join('') +
       chip('newArea', '1', '＋新しい大項目', s.newArea);
-    var na = s.newArea ? '<div class="row"><input class="in" data-f="newAreaName" value="' + esc(s.newAreaName) + '" placeholder="例）1.配管設備" aria-label="新しい大項目の名前"></div>' : '';
+    var na = s.newArea ? '<div class="row newarea"><span class="anum" title="番号は自動で付きます">' + areaNumNext() + '.</span><input class="in" data-f="newAreaName" value="' + esc(stripNum(s.newAreaName)) + '" placeholder="例）配管設備" aria-label="新しい大項目の名前（番号は自動）"></div>' : '';
     var sh = sysList().map(function (b) { return chip('sys', b, b || '（系統なし）', b === s.sys); }).join('');
     return '<section class="st">' + stepHead('01', '区分・系統', 'A列・B列', true) +
       '<div class="lbl">大項目</div><div class="chips">' + ah + '</div>' + na +
@@ -631,27 +666,103 @@
     var elb = s.item === 'pipe' ? '<div class="elb"><span>エルボ・チーズ 1式（任意）</span><input class="in num" data-f="elbow" value="' + esc(s.elbow) + '" placeholder="金額" aria-label="エルボ・チーズの金額"><span>円</span></div>' : '';
     return '<section class="st">' + stepHead('03', '品目', 'D列・E列', true) + '<div class="tiles">' + tiles + '</div>' + sub + elb + '</section>';
   }
+  // 仕様を「保温材（色分け）・貼り・仕上げ・目印」に分けて表示
+  var FAMC = { GW: 'gw', RW: 'rw', PF: 'pf', FP: 'fp', 'ゴム': 'rb' };
+  function specView(spec) {
+    if (!spec) return '<span class="sp"><b class="sp-mat">未選択</b></span>';
+    var p = UA.specParts(spec);
+    return '<span class="sp">' +
+      p.pre.map(function (x) { return '<i class="sp-pre">' + esc(x) + '</i>'; }).join('') +
+      (p.facing ? '<i class="sp-face">' + esc(p.facing.replace(/付$/, '')) + '</i>' : '') +
+      '<b class="sp-mat ' + (FAMC[p.fam] || 'no') + '">' + esc(p.mat) + '</b>' +
+      p.tags.map(function (t) { return '<i class="sp-tag' + (t === 'ヒーター' ? ' hot' : '') + '">' + esc(t) + '</i>'; }).join('') + '</span>' +
+      (p.rest.length ? '<span class="sp-rest">' + p.rest.map(function (x) { return '<em>＋</em>' + esc(x); }).join('') + '</span>' : '');
+  }
+  // 積算資料の表が当たるか（代表のサイズで確認）
+  var skHintCache = {};
+  function skHint(spec, place) {
+    if (!st.sk || !spec) return null;
+    var s = st.sel, k = kind(), pl = place || s.place, keyC = s.item + '|' + pl + '|' + dOf() + '|' + spec + '|' + Object.keys(s.ent).join(',');
+    if (keyC in skHintCache) return skHintCache[keyC];
+    var sizes = Object.keys(s.ent).map(Number);
+    if (!sizes.length) sizes = k && k.series === 'A' ? (s.item === 'pipe' ? [50, 25, 100] : [100, 65]) : k && k.series === 'φ' ? [200] : [s.item === 'rect' ? '矩形' : (s.sub || 'BOX')];
+    var hit = null;
+    sizes.some(function (z) {
+      return [UA.defThick(st.master, s.item, spec, z), '25', '40', '50', '20', '30'].some(function (f) {
+        var r = UA.skLook(st.sk, st.master, { item: s.item, d: dOf(), place: pl, spec: spec, size: z, f: f });
+        if (r.p != null) { hit = r; return true; } return false;
+      });
+    });
+    skHintCache[keyC] = hit ? { id: hit.id, approx: hit.approx, tip: hit.ref.y } : { none: true };
+    return skHintCache[keyC];
+  }
+  function skTag(spec, place) {
+    var h = skHint(spec, place);
+    if (!h) return '';
+    if (h.none) return '<span class="sk none" title="保温積算資料に当たる表がありません（M_積算資料対応）">表なし</span>';
+    return '<span class="sk' + (h.approx ? ' near' : '') + '" title="' + esc(h.tip) + '">§' + esc(h.id) + '</span>';
+  }
   function step4() {
-    var s = st.sel, ss = sheetSpec();
-    var opts = UA.specOptions(st.master, s.item, s.place, ss);
-    var hit = opts.filter(function (o) { return o.spec === s.spec; })[0];
-    var badge = s.custom && s.spec === s.custom ? ['直接入力', 'b-warn'] : hit && hit.sheet ? [(s.specAuto ? 'AUTO ' : '') + 'この見積で使用中', 'b-info']
-      : hit && hit.here ? [(s.specAuto ? 'AUTO ' : '') + s.place + 'で' + hit.n + '回', 'b-info'] : hit ? ['他の場所で' + hit.n + '回', 'b-mute'] : ['履歴なし', 'b-warn'];
+    var s = st.sel, gs = specGroups(), flat = [];
+    st.ui.specIdx = flat;
+    var hit = null;
+    gs.forEach(function (g) { g.items.forEach(function (x) { if (!hit && x.spec === s.spec && g.key !== 'hidden') hit = x; }); });
+    var badge = s.custom && s.spec === U.normSpec(s.custom) ? ['直接入力', 'b-warn'] : hit && hit.sheet ? [(s.specAuto ? 'AUTO ' : '') + 'この見積で使用中', 'b-info']
+      : hit && hit.here ? [(s.specAuto ? 'AUTO ' : '') + s.place + 'の候補', 'b-info'] : hit ? ['全箇所の候補', 'b-mute'] : ['候補にない仕様', 'b-warn'];
+    var nAll = 0; gs.forEach(function (g) { if (g.key !== 'hidden') nAll += g.items.length; });
+    var head = '<div class="speccard"><span class="spv" title="(' + esc(s.spec) + ')">' + specView(s.spec) + '<span class="sopt-meta"><span class="badge ' + badge[1] + '">' + esc(badge[0]) + '</span>' + skTag(s.spec) + '</span></span>' +
+      '<button type="button" class="ghost" data-act="specToggle" aria-expanded="' + st.ui.specOpen + '">' + (st.ui.specOpen ? '閉じる' : '候補' + nAll + '件') + '</button></div>';
     var list = '';
     if (st.ui.specOpen) {
-      list = '<div class="speclist">' + opts.slice(0, 8).map(function (o, i) {
-        var meta = o.sheet ? 'この見積で使用中' : o.here ? s.place + 'で' + o.n + '回' : '他の場所 ' + o.n + '回';
-        return '<button type="button" class="specopt' + (o.spec === s.spec ? ' on' : '') + '" data-act="spec" data-v="' + i + '"><span>(' + esc(o.spec) + ')</span><small>' + esc(meta) + '</small></button>';
-      }).join('') + '<input class="in" data-f="custom" value="' + esc(s.custom) + '" placeholder="その他の仕様を直接入力" aria-label="仕様を直接入力"></div>';
+      var seg = ['', '民間', '官庁'].map(function (c) { return '<button type="button" class="seg' + (st.siteType === c ? ' on' : '') + '" data-act="siteType" data-v="' + c + '">' + (c || 'すべて') + '</button>'; }).join('');
+      list = '<div class="speclist"><div class="slhd"><span title="この見積書を民間・官庁のどちらとして候補を出すか（この見積書に記憶）">この見積の区分</span><span class="segs">' + seg + '</span></div>';
+      gs.forEach(function (g) {
+        list += '<div class="slgt">' + esc(g.title) + '<small>' + g.items.length + '</small></div>';
+        list += g.items.map(function (it) { var i = flat.push(Object.assign({ grp: g.key }, it)) - 1; return optView(it, i, g.key); }).join('');
+      });
+      if (gs.hiddenCount) list += '<button type="button" class="link sm" data-act="showHidden">' + (st.ui.showHidden ? '非表示にした候補を隠す' : '非表示にした候補を表示（' + gs.hiddenCount + '件）') + '</button>';
+      var pl = s.place || '（全箇所）';
+      list += '<div class="addspec"><div class="lbl">候補を追加（このパソコンに記憶。メニューから書き出して設定マスタへ移せます）</div>' +
+        '<input class="in" data-f="specNew" value="' + esc(st.ui.newSpec) + '" placeholder="例）ALK付Gw筒＋亀甲金網16m/m（括弧なし）" aria-label="追加する仕様">' +
+        '<div class="row"><select class="in" data-f="specNewPlace" aria-label="候補を出す施工箇所"><option value="here"' + (st.ui.newPlace !== 'all' ? ' selected' : '') + '>' + esc(pl) + 'だけ</option><option value="all"' + (st.ui.newPlace === 'all' ? ' selected' : '') + '>全箇所</option></select>' +
+        '<select class="in" data-f="specNewCat" aria-label="民間・官庁"><option value="">民間・官庁とも</option><option value="民間"' + (st.ui.newCat === '民間' ? ' selected' : '') + '>民間だけ</option><option value="官庁"' + (st.ui.newCat === '官庁' ? ' selected' : '') + '>官庁だけ</option></select></div>' +
+        '<div class="row"><button type="button" class="ghost" data-act="specUse"' + (st.ui.newSpec ? '' : ' disabled') + '>今回だけ使う</button><button type="button" class="ghost acc" data-act="specAdd"' + (st.ui.newSpec ? '' : ' disabled') + '>候補に追加して使う</button></div></div>';
+      list += '</div>';
     }
-    return '<section class="st">' + stepHead('04', '仕様', 'E列（括弧書き）', !!s.spec) +
-      '<div class="speccard"><span class="badge ' + badge[1] + '">' + esc(badge[0]) + '</span><b class="spec">(' + esc(s.spec || '未選択') + ')</b>' +
-      '<button type="button" class="ghost" data-act="specToggle" aria-expanded="' + st.ui.specOpen + '">' + (st.ui.specOpen ? '閉じる' : '候補' + opts.length + '件') + '</button></div>' + list + '</section>';
+    return '<section class="st">' + stepHead('04', '仕様', 'E列（括弧書き）', !!s.spec) + head + list + '</section>';
   }
+  function optView(it, i, gk) {
+    var s = st.sel, on = it.spec === s.spec && gk !== 'hidden';
+    var ed = st.ui.specEdit;
+    if (ed && ed.i === i) {
+      return '<div class="sopt edit"><input class="in" data-f="specEditText" value="' + esc(ed.spec) + '" aria-label="仕様を編集">' +
+        '<div class="row"><select class="in" data-f="specEditPlace"><option value="here"' + (ed.place !== '（全箇所）' ? ' selected' : '') + '>' + esc(s.place) + 'だけ</option><option value="all"' + (ed.place === '（全箇所）' ? ' selected' : '') + '>全箇所</option></select>' +
+        '<select class="in" data-f="specEditCat"><option value="">民間・官庁とも</option><option value="民間"' + (ed.cat === '民間' ? ' selected' : '') + '>民間だけ</option><option value="官庁"' + (ed.cat === '官庁' ? ' selected' : '') + '>官庁だけ</option></select></div>' +
+        '<div class="row"><button type="button" class="ghost" data-act="specCancel">取消</button><button type="button" class="ghost acc" data-act="specSave">保存</button></div></div>';
+    }
+    var meta;
+    if (gk === 'sheet') meta = it.cur ? 'この塊で使用' : (it.place ? it.place : '施工箇所なし') + 'で使用' + (it.n > 1 ? '（' + it.n + 'か所）' : '');
+    else meta = (it.here ? s.place + 'で' : '全箇所 ') + it.n + '回' + (it.src === 'local' ? '・追加分' : '') + (it.cat ? '・' + it.cat : '');
+    var acts = '';
+    if (gk === 'hidden') acts = '<button type="button" class="ic-b" data-act="specUnhide" data-v="' + i + '" title="候補に戻す">戻す</button>';
+    else if (gk !== 'sheet') acts = '<button type="button" class="ic-b' + (it.pin ? ' on' : '') + '" data-act="specPin" data-v="' + i + '" title="' + (it.pin ? '固定をやめる' : 'いちばん上に固定') + '">' + (it.pin ? '★' : '☆') + '</button>' +
+      '<button type="button" class="ic-b" data-act="specEdit" data-v="' + i + '" title="編集">✎</button>' +
+      '<button type="button" class="ic-b" data-act="specHide" data-v="' + i + '" title="' + (it.src === 'local' ? '削除' : '候補から外す（設定マスタは変わりません）') + '">×</button>';
+    return '<div class="sopt' + (on ? ' on' : '') + (gk === 'hidden' ? ' off' : '') + '"><button type="button" class="sopt-main" data-act="specPick" data-v="' + i + '" title="(' + esc(it.spec) + ')"' + (gk === 'hidden' ? ' disabled' : '') + '>' +
+      '<span class="sopt-body">' + specView(it.spec) + '</span><span class="sopt-meta">' + esc(meta) + skTag(it.spec, gk === 'sheet' && it.place ? it.place : '') + '</span></button>' +
+      (acts ? '<span class="sopt-acts">' + acts + '</span>' : '') + '</div>';
+  }
+  function saveSpecLocal() { if (!save(K_SPECS, st.specLocal)) toast('候補の変更をこのパソコンに記憶できませんでした', 'warn'); }
+  function specKindOf() { return UA.KIND_OF_ITEM[st.sel.item] || st.sel.item; }
   function step5() {
     var s = st.sel, k = kind(), h = [];
     if (!k) return '';
     var d = dOf();
+    var tl = (st.master.output && st.master.output.thickList) || ['20', '25', '30', '40', '50', '65', '75'];
+    h.push('<div class="thick"><span class="lbl">保温厚</span>' + ['（標準）'].concat(tl).map(function (t) {
+      var v = t === '（標準）' ? '' : t, on = (s.tSel || '') === v;
+      return '<button type="button" class="tk' + (on ? ' on' : '') + '" data-act="thick" data-v="' + v + '" aria-pressed="' + on + '" title="' + (v ? '選んでいるサイズの保温厚を ' + v + 'mm にします' : 'サイズごとの標準の保温厚（M_標準厚）') + '">' + esc(v ? v : '標準') + '</button>';
+    }).join('') + '</div>');
     if (k.series) {
       var sizes = st.master.sizes[k.series] || [];
       h.push('<div class="sizes">' + sizes.map(function (z) {
@@ -697,7 +808,7 @@
       }).join('') + '<button type="button" class="ghost sm" data-act="addDim">＋寸法を追加</button></div>');
     }
     var ok = buildLines().length > 0;
-    return '<section class="st">' + stepHead('05', k.series ? 'サイズ・数量' : '数量', 'E・F・G・I列', ok) + h.join('') + '</section>';
+    return '<section class="st">' + stepHead('05', k.series ? '保温厚・サイズ・数量' : '保温厚・数量', 'E・F・G・I列', ok) + h.join('') + (k.series && sel && sel.length ? '<div class="hint">数量の欄で Enter＝次のサイズへ、Ctrl＋Enter＝前のサイズへ</div>' : '') + '</section>';
   }
   function planView() {
     var p = currentPlan();
@@ -724,8 +835,8 @@
     var p = currentPlan(), ok = p && p.ok && st.headerOK;
     return '<footer class="ft"><div class="sum"><span>追加 <b>' + (p && p.ok ? p.addCount : 0) + '</b>行・加算 <b>' + (p && p.ok ? p.mergeCount : 0) + '</b>行</span>' +
       '<strong>＋¥' + U.yen(p && p.ok ? p.addAmount : 0) + '</strong></div>' +
-      '<div class="btns"><button type="button" class="ghost" data-act="locate"' + (ok ? '' : ' disabled') + '>場所を見る</button>' +
-      '<button type="button" class="cta" data-act="register"' + (ok && !st.ui.busy ? '' : ' disabled') + '>' + (st.ui.busy ? '処理中…' : '内訳に登録') + '<kbd>Enter</kbd></button></div></footer>';
+      '<div class="btns"><button type="button" class="ghost" data-act="locate"' + (ok ? '' : ' disabled') + ' title="登録する前に、書き込む位置をシート上で選択して見せます（シートは変わりません）">位置を確認</button>' +
+      '<button type="button" class="cta" data-act="register"' + (ok && !st.ui.busy ? '' : ' disabled') + '>' + (st.ui.busy ? '処理中…' : '内訳に登録') + '</button></div></footer>';
   }
   function toastView() {
     var t = st.ui.toast;
@@ -761,18 +872,68 @@
         case 'item': normalizeSel({ item: v, specAuto: true, custom: '' }); break;
         case 'sub': normalizeSel({ sub: v }); break;
         case 't16': normalizeSel({ t16: !s.t16 }); break;
-        case 'specToggle': st.ui.specOpen = !st.ui.specOpen; break;
-        case 'spec': {
-          var o = UA.specOptions(st.master, s.item, s.place, sheetSpec())[+v];
-          if (o) normalizeSel({ spec: o.spec, specAuto: +v === 0, custom: '' });
+        case 'specToggle': st.ui.specOpen = !st.ui.specOpen; st.ui.specEdit = null; break;
+        case 'specPick': {
+          var o = st.ui.specIdx[+v];
+          if (o) { normalizeSel({ spec: o.spec, specAuto: false, custom: '' }); st.ui.specOpen = false; }
           break;
         }
+        case 'specPin': {
+          var op = st.ui.specIdx[+v];
+          if (op && op.key) { if (st.specLocal.pin[op.key]) delete st.specLocal.pin[op.key]; else st.specLocal.pin[op.key] = true; saveSpecLocal(); }
+          break;
+        }
+        case 'specHide': {
+          var oh = st.ui.specIdx[+v];
+          if (oh && oh.src === 'local') st.specLocal.add = st.specLocal.add.filter(function (a) { return a.id !== oh.id; });
+          else if (oh && oh.key) st.specLocal.hide[oh.key] = true;
+          saveSpecLocal(); if (oh && oh.spec === s.spec) normalizeSel({ specAuto: true });
+          break;
+        }
+        case 'specUnhide': { var ou = st.ui.specIdx[+v]; if (ou && ou.key) { delete st.specLocal.hide[ou.key]; saveSpecLocal(); } break; }
+        case 'showHidden': st.ui.showHidden = !st.ui.showHidden; break;
+        case 'specEdit': { var oe = st.ui.specIdx[+v]; if (oe) st.ui.specEdit = { i: +v, spec: oe.spec, place: oe.place, cat: oe.cat || '', src: oe.src, id: oe.id, key: oe.key, kind: oe.kind }; break; }
+        case 'specCancel': st.ui.specEdit = null; break;
+        case 'specSave': {
+          var ed = st.ui.specEdit, sp = ed ? U.normSpec(ed.spec) : '';
+          if (ed && sp) {
+            var plc = ed.place === '（全箇所）' ? '（全箇所）' : s.place;
+            if (ed.src === 'local') st.specLocal.add = st.specLocal.add.map(function (a) { return a.id === ed.id ? Object.assign({}, a, { spec: sp, place: plc, cat: ed.cat }) : a; });
+            else { st.specLocal.hide[ed.key] = true; st.specLocal.add.push({ id: 'L' + Date.now(), kind: ed.kind || specKindOf(), place: plc, spec: sp, cat: ed.cat, from: ed.spec }); }
+            saveSpecLocal(); st.ui.specEdit = null; normalizeSel({ spec: sp, specAuto: false, custom: '' });
+          }
+          break;
+        }
+        case 'specUse': { if (st.ui.newSpec) { normalizeSel({ spec: U.normSpec(st.ui.newSpec), specAuto: false, custom: st.ui.newSpec }); st.ui.specOpen = false; } break; }
+        case 'specAdd': {
+          var ns = U.normSpec(st.ui.newSpec);
+          if (ns) {
+            st.specLocal.add.push({ id: 'L' + Date.now(), kind: specKindOf(), place: st.ui.newPlace === 'all' ? '（全箇所）' : s.place, spec: ns, cat: st.ui.newCat });
+            saveSpecLocal(); st.ui.newSpec = ''; normalizeSel({ spec: ns, specAuto: false, custom: '' }); st.ui.specOpen = false;
+            toast('仕様の候補に追加しました（このパソコンに記憶）', 'ok');
+          }
+          break;
+        }
+        case 'siteType': {
+          st.siteType = v || '';
+          try { Office.context.document.settings.set('uchiwake.siteType', st.siteType); Office.context.document.settings.saveAsync(function () {}); } catch (e) { /* noop */ }
+          normalizeSel({ specAuto: s.specAuto });
+          break;
+        }
+        case 'thick': {
+          s.tSel = v || '';
+          var et = {}; Object.keys(s.ent).forEach(function (kk) { et[kk] = Object.assign({}, s.ent[kk]); if (v) et[kk].f = v; else delete et[kk].f; delete et[kk].i; }); s.ent = et;
+          s.rf = v || undefined; s.ri = undefined;
+          st.ui.noRestore = true;
+          break;
+        }
+        case 'exportSpecs': exportSpecs(); return;
         case 'size': {
           var e = Object.assign({}, s.ent);
           if (e[v]) delete e[v]; else e[v] = { g: '' };
+          if (e[v] && s.tSel) e[v].f = s.tSel;
           s.ent = e;
-          st.ui.noRestore = true;
-          if (e[v]) setTimeout(function () { var i = document.querySelector('[data-f="ent.g"][data-k="' + v + '"]'); if (i) i.focus(); }, 0);
+          st.ui.noRestore = true;   // サイズのボタンを押しても画面は動かさない（数量の欄は下に増えるだけ）
           break;
         }
         case 'addDim': s.dims = s.dims.concat([{ w: '', h: '', l: '' }]); break;
@@ -782,7 +943,7 @@
           if (p) {
             var ar = areas().filter(function (x) { return U.trimAll(x.name) === U.trimAll(p.area); })[0];
             var patch = { item: p.item, sub: p.sub, place: p.place, sys: p.sys, specAuto: true, custom: '' };
-            if (ar) { patch.areaRow = ar.row; patch.newArea = false; } else { patch.newArea = true; patch.newAreaName = p.area; }
+            if (ar) { patch.areaRow = ar.row; patch.newArea = false; } else { patch.newArea = true; patch.newAreaName = stripNum(p.area); }
             normalizeSel(patch);
             if (p.sys !== undefined) st.sel.sys = sysList().indexOf(p.sys) >= 0 ? p.sys : st.sel.sys;
             normalizeSel();
@@ -803,22 +964,42 @@
     document.addEventListener('change', function (ev) {
       var el = ev.target;
       if (el.dataset && el.dataset.f === 'target') { st.target = el.value; st.sel.areaRow = null; loadModel().then(function () { normalizeSel(); render(); }); }
+      var ff = el.dataset && el.dataset.f;
+      if (ff === 'specNewPlace') st.ui.newPlace = el.value;
+      if (ff === 'specNewCat') st.ui.newCat = el.value;
+      if (ff === 'specEditPlace' && st.ui.specEdit) st.ui.specEdit.place = el.value === 'all' ? '（全箇所）' : st.sel.place;
+      if (ff === 'specEditCat' && st.ui.specEdit) st.ui.specEdit.cat = el.value;
     });
+    // Enter は登録しない。数量の欄では Enter＝次のサイズの数量、Ctrl＋Enter＝前のサイズの数量
     document.addEventListener('keydown', function (ev) {
-      if (ev.key !== 'Enter' || ev.isComposing || ev.keyCode === 229) return;
+      if (ev.key !== 'Enter' || ev.isComposing || ev.keyCode === 229 || st.ui.composing) return;
       var el = ev.target;
-      if (el && el.tagName === 'INPUT' && el.dataset.f && el.dataset.f !== 'custom' && el.dataset.f !== 'newAreaName') { ev.preventDefault(); register(); }
-    });
-  }
+      if (!el || (el.tagName !== 'INPUT' && el.tagName !== 'SELECT')) return;
+      var f = el.dataset && el.dataset.f;
+      ev.preventDefault();
+      if (f === 'ent.g' || f === 'ent.f' || f === 'ent.i') {
+        var list = Array.prototype.slice.call(document.querySelectorAll('[data-f="ent.g"]'));
+        var i = list.map(function (x) { return x.dataset.k; }).indexOf(el.dataset.k);
+        var nx = list[ev.ctrlKey ? i - 1 : (f === 'ent.g' ? i + 1 : i)];
+        if (nx) { nx.focus(); try { nx.select(); } catch (e) { /* noop */ } }
+        return;
+      }
+      if (f === 'specNew' && st.ui.newSpec) { el.blur(); return; }
+      if (f === 'specEditText') return;
+      if (el.blur) el.blur();
+    });  }
   function onInput(ev, silent) {
     var el = ev.target;
     if (!el || !el.dataset || !el.dataset.f) return;
     var f = el.dataset.f, k = el.dataset.k, v = el.value, s = st.sel;
     if (f === 'target') return;
     if (f === 'cmd') { s.cmd = v; if (!silent) onCmd(v); }
-    else if (f === 'newAreaName') { s.newAreaName = v; if (!silent) normalizeSel({ specAuto: true }); }
+    else if (f === 'newAreaName') { s.newAreaName = stripNum(v); if (!silent) normalizeSel({ specAuto: true }); }
     else if (f === 'elbow') s.elbow = v;
     else if (f === 'custom') { s.custom = v; if (!silent) normalizeSel(v ? { spec: U.normSpec(v), specAuto: false } : { specAuto: true }); }
+    else if (f === 'specNew') { st.ui.newSpec = v; }
+    else if (f === 'specEditText') { if (st.ui.specEdit) st.ui.specEdit.spec = v; return; }
+    else if (f === 'specNewPlace' || f === 'specNewCat' || f === 'specEditPlace' || f === 'specEditCat') return;
     else if (f === 'rq') s.rq = v;
     else if (f === 'rf') s.rf = v;
     else if (f === 'ri') s.ri = v;

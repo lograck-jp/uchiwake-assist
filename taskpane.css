@@ -170,3 +170,54 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .toast button { height: 30px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--line2); background: transparent; }
 .toast .x { border: 0; width: 26px; padding: 0; }
 .toast.info { background: var(--info-bg); }
+
+/* ---- v1.2：大項目の番号・保温厚・仕様の候補 ---- */
+.newarea { align-items: center; }
+.newarea .anum { flex-shrink: 0; min-width: 28px; height: 30px; display: inline-flex; align-items: center; justify-content: center; padding: 0 6px; border-radius: 7px; background: var(--raised); border: 1px solid var(--line2); font: 700 12px Consolas, monospace; color: var(--acc); }
+.thick { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+.thick .lbl { margin-right: 4px; }
+.tk { min-width: 32px; height: 28px; padding: 0 5px; border-radius: 7px; border: 1px solid var(--line); background: var(--surface); color: var(--sub); font: 700 11.5px Consolas, 'Meiryo UI', monospace; }
+.tk:hover { border-color: var(--acc); }
+.tk.on { background: var(--acc); border-color: var(--acc); color: var(--acc-ink); }
+.hint { color: var(--faint); font-size: 10px; }
+
+.speccard .spv { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sp { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.sp-mat { font-size: 13px; letter-spacing: .02em; color: var(--text); }
+.sp-mat.gw { color: #F2C94C; } .sp-mat.rw { color: #F0956A; } .sp-mat.pf { color: #7DC2F5; } .sp-mat.fp { color: #C3A6FF; } .sp-mat.rb { color: #74D9A6; }
+.sp-face, .sp-pre { font-style: normal; font-size: 10px; padding: 1px 5px; border-radius: 4px; background: #2C3137; color: var(--sub); border: 1px solid #3A4048; }
+.sp-pre { background: transparent; }
+.sp-tag { font-style: normal; font-size: 10px; padding: 1px 5px; border-radius: 4px; background: #3A3226; color: var(--warn); }
+.sp-tag.hot { background: #3A2420; color: #FF9B7A; }
+.sp-rest { font-size: 11px; color: var(--sub); line-height: 1.45; word-break: break-all; }
+.sp-rest em { font-style: normal; color: var(--faint); margin: 0 2px; }
+.sk { flex-shrink: 0; font: 700 9.5px Consolas, 'Meiryo UI', monospace; padding: 2px 5px; border-radius: 4px; background: var(--info-bg); color: var(--info); margin-left: 4px; }
+.sk.near { background: var(--warn-bg); color: var(--warn); }
+.sk.none { background: #2A2E34; color: var(--muted); font-weight: 400; }
+
+.speclist { gap: 5px; }
+.slhd { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 2px 4px; color: var(--muted); font-size: 10.5px; }
+.segs { display: inline-flex; border: 1px solid var(--line2); border-radius: 7px; overflow: hidden; }
+.seg { height: 24px; padding: 0 10px; border: 0; background: transparent; color: var(--sub); font-size: 11px; }
+.seg + .seg { border-left: 1px solid var(--line2); }
+.seg.on { background: var(--acc); color: var(--acc-ink); font-weight: 700; }
+.slgt { display: flex; align-items: center; gap: 6px; margin-top: 4px; padding: 0 2px; font-size: 10.5px; font-weight: 700; color: var(--acc); letter-spacing: .04em; }
+.slgt small { font-weight: 400; color: var(--faint); }
+.sopt { display: flex; align-items: stretch; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); }
+.sopt:hover { border-color: #5A5244; }
+.sopt.on { border-color: var(--acc); background: var(--acc-soft); }
+.sopt.off { opacity: .6; }
+.sopt-main { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; padding: 7px 8px; border: 0; background: transparent; text-align: left; color: inherit; }
+.sopt-body { display: flex; flex-direction: column; gap: 2px; width: 100%; }
+.sopt-meta { display: flex; align-items: center; gap: 2px; color: var(--muted); font-size: 10px; }
+.sopt-acts { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 4px; border-left: 1px solid #2C3137; }
+.ic-b { width: 26px; height: 22px; padding: 0; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); font-size: 12px; }
+.ic-b:hover { border-color: var(--line2); color: var(--text); }
+.ic-b.on { color: var(--acc); }
+.sopt.edit { flex-direction: column; gap: 6px; padding: 8px; }
+.addspec { display: flex; flex-direction: column; gap: 5px; margin-top: 6px; padding-top: 8px; border-top: 1px dashed #2F353D; }
+.addspec .row, .sopt.edit .row { gap: 5px; }
+.addspec select.in, .sopt.edit select.in { flex: 1; }
+.addspec .ghost, .sopt.edit .ghost { flex: 1; }
+.ghost.acc { border-color: var(--acc); color: var(--acc); }
+.link.sm { font-size: 10.5px; align-self: flex-start; }
