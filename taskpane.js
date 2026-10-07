@@ -5,19 +5,19 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '1.2.2';
+  var VERSION = '1.3.0';
   var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1', K_UI = 'uchiwake-assist.ui.v1';
   var HOW_LABEL = { add: '下に追加', merge: '数量を足す', row: '行を指定' };
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
 
   var st = {
     master: null, masterInfo: null, sk: null, skInfo: null, specLocal: { add: [], hide: {}, pin: {} }, siteType: '', AL: {}, sheets: [], target: '', model: null, headerOK: false, modelErr: '',
-    sel: freshSel(), ui: { specOpen: false, menu: false, busy: false, toast: null, composing: false, specEdit: null, showHidden: false, newSpec: '', newCat: '', newPlace: 'here', specIdx: [], how: 'add', atRow: '' },
+    sel: freshSel(), ui: { specOpen: false, menu: false, busy: false, toast: null, composing: false, specEdit: null, showHidden: false, newSpec: '', newCat: '', newPlace: 'here', specIdx: [], how: 'add', atRow: '', elbowOn: false },
     undo: null, memo: { idx: {}, list: [] }, autoOpen: false, api19: false, api17: false, onChanged: null
   };
   function freshSel() {
-    return { areaRow: null, area: '', newArea: false, newAreaName: '', sys: '', place: '', item: 'pipe', sub: '', t16: false, tSel: '',
-      spec: '', specAuto: true, custom: '', ent: {}, rq: '', rf: undefined, ri: undefined, dims: [{ w: '', h: '', l: '' }], elbow: '', cmd: '' };
+    return { areaRow: null, area: '', newArea: false, noArea: false, newAreaName: '', sys: '', place: '', item: 'pipe', sub: '', t16: false, tSel: '',
+      spec: '', specAuto: true, custom: '', ent: {}, vent: {}, rq: '', rf: undefined, ri: undefined, dims: [{ w: '', h: '', l: '' }], cmd: '' };
   }
 
   /* ---------- 保存（このパソコンの中） ---------- */
@@ -43,6 +43,8 @@
     try { st.siteType = Office.context.document.settings.get('uchiwake.siteType') || ''; } catch (e) { /* noop */ }
     var skRaw = load(K_SK); if (skRaw && skRaw.sk && skRaw.sk.tables) { st.sk = skRaw.sk; st.skInfo = skRaw.info; }
     var uiRaw = load(K_UI); if (uiRaw && (uiRaw.how === 'add' || uiRaw.how === 'merge')) st.ui.how = uiRaw.how;
+    st.ui.howSaved = st.ui.how;
+    if (uiRaw && uiRaw.elbowOn) st.ui.elbowOn = true;
     bindEvents();
     $('#masterFile').addEventListener('change', onMasterFile);
     $('#skFile').addEventListener('change', onSkFile);
@@ -114,31 +116,27 @@
     reader.readAsArrayBuffer(f);
   }
   function refColsOf() { return (st.master && st.master.output && st.master.output.refCols) || { y: 'Y', z: 'Z', aa: 'AA', ab: 'AB' }; }
-  function priceOrder() {
-    var v = (st.master && st.master.output && st.master.output.priceSrc) || '保温積算資料';
-    var a = v.indexOf('保温'), b = v.indexOf('過去');
-    if (a >= 0 && b >= 0) return a < b ? ['sk', 'hist'] : ['hist', 'sk'];
-    return b >= 0 ? ['hist'] : ['sk'];
-  }
-  function sizeText(size) { var k = kind(); return k && k.series === 'A' ? size + 'A' : k && k.series === 'φ' ? 'φ' + size : String(size); }
+  // 単価は保温積算資料（協会単価）だけから取る。表に無いものは空欄（過去の見積・手入力の記録は使わない）
+  function priceOrder() { return ['sk']; }
+  function seriesOf() { var k = kind(); if (!k) return ''; return st.sel.item === 'pipe' && st.sel.sub === 'SUS' && st.master.sizes.Su ? 'Su' : k.series; }
+  function sizeDef(n) { return (st.master.sizes[seriesOf()] || []).filter(function (z) { return z.n === n; })[0] || null; }
+  function sizeText(size) { var ser = seriesOf(); return ser === 'A' ? size + 'A' : ser === 'Su' ? size + 'Su' : ser === 'φ' ? 'φ' + size : String(size); }
   // 単価と、その参照元（Y〜AB列に書く内容）
   function priceOf(d, spec, size, f) {
-    var s = st.sel, m = st.master, order = priceOrder(), skr = null;
-    var h = UA.lookPrice(m, s.item, d, spec, size, f, st.memo.idx);
-    if (h.memo) return { p: h.p, key: h.key, cap: ['手入力の記録 ' + h.date, 'c-info'], ref: { y: '手入力の記録（' + h.date + '）', z: spec, aa: sizeText(size), ab: f ? f + 'mm' : '' } };
-    for (var i = 0; i < order.length; i++) {
-      if (order[i] === 'sk') {
-        if (!st.sk) continue;
-        skr = UA.skLook(st.sk, m, { item: s.item, d: d, place: s.place, spec: spec, size: size, f: f });
-        if (skr.p != null) return { p: skr.p, iF: skr.formula, key: h.key, cap: ['積算資料 §' + skr.id + (skr.approx ? '（近い表）' : ''), skr.approx ? 'c-warn' : 'c-info'], ref: skr.ref, tip: skr.ref.y };
-      } else if (h.p != null) {
-        var y = '過去見積 ' + h.date + (h.ref ? '（' + h.ref + 'の単価）' : '') + (h.src ? '　' + h.src : '');
-        return { p: h.p, key: h.key, cap: h.ref ? ['参考：' + h.ref + 'の過去単価', 'c-warn'] : ['過去見積 ' + h.date, 'c-mute'], ref: { y: y, z: spec, aa: sizeText(size), ab: f ? f + 'mm' : '' }, tip: y };
-      }
+    var s = st.sel, m = st.master, look = size, conv = '';
+    if (seriesOf() === 'Su') {
+      var z = sizeDef(U.num(size));
+      if (z && z.priceSize) { look = z.priceSize; conv = size + 'Su（' + z.priceSize + 'A相当）'; }
+      else return { p: null, cap: ['Suの読み替えなし', 'c-err'], ref: { y: '単価なし：' + size + 'Su に当たる鋼管のサイズが M_サイズ にありません', z: '', aa: '', ab: '' }, tip: 'M_サイズ の「単価に使うサイズ」' };
     }
-    var noFile = !st.sk && order.indexOf('sk') >= 0;
-    var why = noFile ? '保温積算資料が未読込' : (skr && skr.why && skr.why !== 'nomatch' ? skr.why : '対応する表がありません（M_積算資料対応）');
-    return { p: null, key: h.key, cap: [noFile ? '保温積算資料が未読込' : '単価表に該当なし', 'c-err'], ref: { y: '単価なし：' + why, z: '', aa: '', ab: '' }, tip: why };
+    if (!st.sk) return { p: null, cap: ['保温積算資料が未読込', 'c-err'], ref: { y: '単価なし：保温積算資料が未読込', z: '', aa: '', ab: '' }, tip: '保温積算資料が未読込' };
+    var skr = UA.skLook(st.sk, m, { item: s.item, d: d, place: s.place, spec: spec, size: look, f: f });
+    if (skr.p != null) {
+      var ref = Object.assign({}, skr.ref); if (conv) ref.aa = conv;
+      return { p: skr.p, iF: skr.formula, cap: ['積算資料 §' + skr.id + (skr.approx ? '（近い表）' : ''), skr.approx ? 'c-warn' : 'c-info'], ref: ref, tip: ref.y + (conv ? '　' + conv : '') };
+    }
+    var why = skr.why && skr.why !== 'nomatch' ? skr.why : '対応する表がありません（M_積算資料対応）';
+    return { p: null, cap: ['協会単価なし', 'c-err'], ref: { y: '単価なし：' + why, z: '', aa: '', ab: '' }, tip: why };
   }
 
   /* ---------- シートの読み込み ---------- */
@@ -217,7 +215,7 @@
   function kind() { return st.master && st.master.kindById[st.sel.item]; }
   function subsOf(item) { return st.master ? (st.master.subs[item] || []).filter(function (s) { return s.use; }) : []; }
   function areas() { return st.model ? UA.areasOf(st.model) : []; }
-  function curAreaName() { var s = st.sel; if (s.newArea) return areaNumNext() + '.' + stripNum(s.newAreaName); var a = areas().filter(function (x) { return x.row === s.areaRow; })[0]; return a ? a.name : ''; }
+  function curAreaName() { var s = st.sel; if (s.noArea && !s.newArea) return ''; if (s.newArea) return areaNumNext() + '.' + stripNum(s.newAreaName); var a = areas().filter(function (x) { return x.row === s.areaRow; })[0]; return a ? a.name : ''; }
   // 大項目の番号は自動（シート上の最大の番号＋1）
   function areaNumNext() { var n = 0; areas().forEach(function (a) { var mm = U.toHalf(a.name).match(/^\s*(\d+)\s*[.．、]/); if (mm) n = Math.max(n, +mm[1]); }); return n + 1; }
   function stripNum(t) { return String(t == null ? '' : t).replace(/^\s*[0-9０-９]+\s*[.．、]\s*/, ''); }
@@ -225,6 +223,7 @@
   function sysList() {
     var s = st.sel, fam = famOfSel(), out = [];
     if (!st.master) return out;
+    if (s.noArea && !s.newArea) return [''];
     var hasNone = st.master.systems.some(function (x) { return x.name === '' && x.use && x.fam === fam; });
     if (hasNone) out.push('');
     if (!s.newArea && s.areaRow) UA.sysOf(st.model, s.areaRow).forEach(function (b) { if (out.indexOf(b) < 0) out.push(b); });
@@ -248,9 +247,10 @@
       if (!patch || !('sub' in patch)) s.sub = defaultSub(s.item);
       if (!patch || !('ent' in patch)) s.ent = {};
       if (!patch || !('rq' in patch)) s.rq = '';
-      s.dims = [{ w: '', h: '', l: '' }]; s.elbow = ''; if (!patch || !('t16' in patch)) s.t16 = false; if (!patch || !('tSel' in patch)) s.tSel = '';
+      if (!patch || !('vent' in patch)) s.vent = {};
+      s.dims = [{ w: '', h: '', l: '' }]; if (!patch || !('t16' in patch)) s.t16 = false; if (!patch || !('tSel' in patch)) s.tSel = '';
       var kf = kind() ? kind().fam : 'pipe';
-      if ((!patch || (!('areaRow' in patch) && !('newArea' in patch))) && famOfSel() !== kf) {
+      if (!s.noArea && (!patch || (!('areaRow' in patch) && !('newArea' in patch))) && famOfSel() !== kf) {
         var alt = areas().filter(function (a) { return UA.famOfArea(a.name) === kf; })[0];
         if (alt) { s.areaRow = alt.row; s.newArea = false; }
       }
@@ -258,8 +258,10 @@
     var subs = subsOf(s.item);
     if (!subs.length) s.sub = '';
     else if (!subs.some(function (x) { return x.id === s.sub; })) s.sub = defaultSub(s.item);
+    // 管の種類（鋼管／SUS）を変えたらサイズの系列が変わるので選び直し
+    if (s.item === 'pipe' && s.sub !== prev.sub && prev.item === 'pipe' && (!patch || !('ent' in patch))) s.ent = {};
     var al = areas();
-    if (!s.newArea && !al.some(function (a) { return a.row === s.areaRow; })) {
+    if (!s.newArea && !s.noArea && !al.some(function (a) { return a.row === s.areaRow; })) {
       if (al.length) { var kf2 = kind() ? kind().fam : 'pipe'; var pick = al.filter(function (a) { return UA.famOfArea(a.name) === kf2; })[0] || al[0]; s.areaRow = pick.row; }
       else { s.newArea = true; }
     }
@@ -271,12 +273,38 @@
     if (s.specAuto || !s.spec) { s.spec = autoSpec(); if (!s.custom) s.specAuto = true; }
     if (s.spec !== prev.spec || s.sub !== prev.sub || s.item !== prev.item || s.t16 !== prev.t16) {
       var e2 = {}; Object.keys(s.ent).forEach(function (k) { e2[k] = { g: s.ent[k].g }; if (s.tSel) e2[k].f = s.tSel; }); s.ent = e2; s.rf = s.tSel || undefined; s.ri = undefined;
+      if (s.spec !== prev.spec) { var v2 = {}; Object.keys(s.vent || {}).forEach(function (k) { v2[k] = {}; }); s.vent = v2; }
     }
   }
   function sheetSpec() {
     var s = st.sel;
     if (!st.model || s.newArea) return null;
-    return UA.specInSheet(st.model, st.master, curAreaName(), s.areaRow, s.sys, s.place, s.item, dOf());
+    var isV = s.item === 'valve' || s.item === 'flange';
+    if (s.noArea) return tailSpec(s.item) || (isV ? tailSpec('pipe') : null);
+    // バルブ・フランジは、同じ施工箇所の配管（直管）の仕様をそのまま使う
+    return UA.specInSheet(st.model, st.master, curAreaName(), s.areaRow, s.sys, s.place, s.item, dOf()) ||
+      (isV ? UA.specInSheet(st.model, st.master, curAreaName(), s.areaRow, s.sys, s.place, 'pipe') : null);
+  }
+  // 大項目なしのとき：最後の大項目より後ろで、同じ施工箇所に使っている仕様
+  function tailSpec(item) {
+    var recs = st.model.recs, s0 = 0, i, cur = '', spec = null, found = null;
+    for (i = 0; i < recs.length; i++) if (recs[i].t === 'area') s0 = i + 1;
+    for (i = s0; i < recs.length; i++) {
+      var r = recs[i];
+      if (r.t === 'spec' || (r.t === 'sys' && r.e)) { if (r.c) cur = r.c; spec = U.trimAll(cur) === U.trimAll(st.sel.place) ? r.e : null; continue; }
+      if (spec && UA.lineItem(r, 'pipe', st.master) === item) found = spec;
+    }
+    return found;
+  }
+  function blockSel() { var s = st.sel; return { noArea: s.noArea, newArea: s.newArea, area: curAreaName(), areaRow: s.areaRow, sys: s.sys, place: s.place, spec: s.spec }; }
+  // 配管（直管）の保温厚：この塊の同じサイズの直管 → 無ければ M_標準厚
+  function pipeThickFor(size) {
+    var hit = UA.blockLines(st.model, blockSel()).filter(function (r) { return !UA.isPieceLine(r) && String(r.e) === String(size) && r.f; })[0];
+    return hit ? { t: hit.f, from: '内訳の' + size + (hit.d === 'SUS' ? 'Su' : 'A') + '（' + hit.row + '行目）' } : { t: UA.defThick(st.master, 'pipe', st.sel.spec, size), from: '配管の標準厚（M_標準厚）' };
+  }
+  function valveThickFor(size) {
+    var pt = pipeThickFor(size);
+    return { f: UA.valveThick(pt.t, st.master.output && st.master.output.valveThick), pipe: pt.t, from: pt.from };
   }
   function specGroups() {
     var s = st.sel;
@@ -292,7 +320,7 @@
   }
   function dOf() {
     var s = st.sel, d = '';
-    if (s.item === 'valve' || s.item === 'flange') d = s.sub;
+    if (s.item === 'valve' || s.item === 'flange' || s.item === 'pipe') d = s.sub;
     else if (s.item === 'rect' || s.item === 'round') d = s.sub ? s.sub + (s.t16 ? '(1.6t)' : '') : '';
     return UA.normalizeOut(st.master, U.colNum(colsOf().d) ? colsOf().d : 'D', d);
   }
@@ -303,9 +331,10 @@
   function buildLines() {
     var s = st.sel, k = kind(), out = [];
     if (!k) return out;
+    if (s.item === 'valve' || s.item === 'flange') return valveLines();
     var d = dOf(), unit = unitOf();
     if (k.series) {
-      (st.master.sizes[k.series] || []).forEach(function (z) {
+      (st.master.sizes[seriesOf()] || []).forEach(function (z) {
         var key = String(z.n), en = s.ent[key];
         if (!en) return;
         var g = U.num(en.g); if (!(g > 0)) return;
@@ -327,12 +356,36 @@
     }
     return out;
   }
+  // バルブ・フランジ：種類とサイズを選ぶだけ。数量は空欄（内訳で直接入力）。保温厚は配管から、単価は協会単価
+  function ventKey(sub, n) { return sub + '|' + n; }
+  function ventList() {
+    var s = st.sel, out = [];
+    subsOf(s.item).forEach(function (sb) {
+      (st.master.sizes.A || []).forEach(function (z) { var key = ventKey(sb.id, z.n); if (s.vent[key]) out.push({ key: key, sub: sb, z: z, en: s.vent[key] }); });
+    });
+    return out;
+  }
+  function ventRow(v) {
+    var s = st.sel, d = UA.normalizeOut(st.master, 'D', v.sub.id), vt = valveThickFor(v.z.n);
+    var f = (v.en.f !== undefined && v.en.f !== '') ? U.thickKey(v.en.f) : vt.f;
+    var pr = priceOf(d, s.spec, v.z.n, f), manual = v.en.i !== undefined;
+    return { d: d, e: v.z.n, f: f, vt: vt, pr: pr, manual: manual, i: manual ? (v.en.i === '' ? null : U.num(v.en.i)) : pr.p };
+  }
+  function valveLines() {
+    var unit = unitOf();
+    return ventList().map(function (v) {
+      var r = ventRow(v);
+      return { d: r.d, e: r.e, f: r.f, g: '', h: unit, i: r.i, iF: r.manual ? null : r.pr.iF, ref: r.manual ? (r.i == null ? null : { y: '手入力', z: '', aa: '', ab: '' }) : r.pr.ref, manual: r.manual && r.i != null, auto: r.pr.p };
+    });
+  }
   function currentPlan() {
     if (!st.master || !st.model) return null;
-    var s = st.sel;
-    return UA.plan(st.model, { area: curAreaName(), areaRow: s.newArea ? null : s.areaRow, newArea: s.newArea, sys: s.sys, place: s.place, spec: s.spec, item: s.item, lines: buildLines(), elbow: s.item === 'pipe' ? U.num(s.elbow) : 0, totals: !!(st.master.output && st.master.output.makeTotals),
+    var s = st.sel, o = st.master.output || {};
+    return UA.plan(st.model, { area: curAreaName(), areaRow: s.newArea ? null : s.areaRow, newArea: s.newArea, noArea: s.noArea && !s.newArea, sys: s.sys, place: s.place, spec: s.spec, item: s.item, lines: buildLines(),
+      elbow: s.item === 'pipe' && st.ui.elbowOn, elbowRate: o.elbowRate || 0.35, elbowLabel: o.elbowLabel || 'エルボ', totals: !!o.makeTotals,
       how: st.ui.how, atRow: st.ui.atRow }, st.master);
   }
+  function saveUi() { save(K_UI, { how: st.ui.how === 'row' ? (st.ui.howSaved || 'add') : st.ui.how, elbowOn: st.ui.elbowOn }); }
 
   /* ---------- 登録（Excel への書き込み） ---------- */
   function register() {
@@ -377,9 +430,10 @@
             rg.formulas = [rowArray(x, r, cols, maxCol, tpl)];
             // 単価の参照元（Y〜AB列）
             if (x.t === 'line' && x.ref) rk.forEach(function (k) { ws.getRange(rc[k] + r).values = [[x.ref[k] == null ? '' : x.ref[k]]]; });
-            // 仕様（括弧書き）は左揃え、サイズは右揃え（コピーした書式に左右されないように）
+            // 仕様（括弧書き）は左揃え、サイズ・エルボは右揃え、D列（種別）は中央（コピーした書式に左右されないように）
             if (x.t === 'spec') ws.getRange(cols.spec + r).format.horizontalAlignment = 'Left';
-            if (x.t === 'line') ws.getRange(cols.size + r).format.horizontalAlignment = 'Right';
+            if (x.t === 'line' || x.t === 'elbow') ws.getRange(cols.size + r).format.horizontalAlignment = 'Right';
+            if (x.t === 'line') ws.getRange(cols.d + r).format.horizontalAlignment = 'Center';
           });
           p.totalOps.forEach(function (op) { if (op.type === 'set') ws.getRange(jc + op.finalRow).formulas = [[op.formula]]; });
           var appends = p.totalOps.filter(function (op) { return op.type === 'append'; }).map(function (op) {
@@ -397,10 +451,9 @@
         });
       }).then(function () {
         undo.rows = p.inserts.map(function (g) { return { start: g.recs[0].finalRow, count: g.count }; });
-        rememberPrices(lines);
         st.undo = undo;
         var s = st.sel;
-        s.ent = {}; s.rq = ''; s.rf = undefined; s.ri = undefined; s.dims = [{ w: '', h: '', l: '' }]; s.elbow = ''; s.cmd = '';
+        s.ent = {}; s.vent = {}; s.rq = ''; s.rf = undefined; s.ri = undefined; s.dims = [{ w: '', h: '', l: '' }]; s.cmd = '';
         if (s.newArea) { s.pendingArea = curAreaName(); s.newArea = false; s.areaRow = null; }
         // 行を指定して入れたときは、次はその続き（入れた明細のすぐ下）を指す
         if (p.how === 'row') {
@@ -423,13 +476,14 @@
     var n = U.colNum(maxCol), arr = []; for (var i = 0; i < n; i++) arr.push('');
     function put(k, v) { arr[U.colNum(cols[k]) - 1] = v; }
     var jf = function (t) { return t ? t.replace(/\{行\}/g, r) : ''; };
-    put('j', jf(tpl.blank));
+    // 仕様の行（括弧書き）・大項目・系統の行の J列は式を入れない
+    if (x.t !== 'spec' && x.t !== 'area' && x.t !== 'sys') put('j', jf(tpl.blank));
     if (x.t === 'area') put('area', x.a);
     else if (x.t === 'sys') put('sys', x.b);
     else if (x.t === 'spec') { if (x.c) put('place', '(' + x.c + ')'); if (x.d) put('d', x.d); put('spec', '(' + x.e + ')'); }
     else if (x.t === 'line') {
       put('d', x.dShow || ''); put('size', x.e); put('f', numOrText(x.f)); put('g', x.g); put('h', x.h); put('i', x.iF || (x.i == null ? '' : x.i)); put('j', jf(tpl.line));
-    } else if (x.t === 'elbow') { put('spec', x.e || 'エルボ・チーズ'); put('g', 1); put('h', '式'); put('j', x.j); }
+    } else if (x.t === 'elbow') { put('size', x.e || 'エルボ'); put('g', 1); put('h', '式'); put('j', x.formula || ''); }
     else if (x.t === 'total') { put('label', x.label); put('j', x.formula); }
     return arr;
   }
@@ -574,9 +628,16 @@
       if (alt && famOfSel() !== fam) { patch.areaRow = alt.row; patch.newArea = false; }
     }
     var k = km[item];
-    if (r.sizes.length && k && k.series) {
+    if (r.sizes.length && (item === 'valve' || item === 'flange')) {
+      // バルブ・フランジは数量を使わない（種類とサイズだけ）
+      var vsub = r.sub !== undefined ? r.sub : (item === s.item ? s.sub : defaultSub(item)), vent = item === s.item ? Object.assign({}, s.vent) : {};
+      r.sizes.forEach(function (z) { if ((st.master.sizes.A || []).some(function (x) { return x.n === z.n; })) vent[ventKey(vsub, z.n)] = {}; });
+      patch.vent = vent;
+    } else if (r.sizes.length && k && k.series) {
       var ent = {};
-      r.sizes.forEach(function (z) { if ((st.master.sizes[k.series] || []).some(function (x) { return x.n === z.n; })) ent[String(z.n)] = { g: z.g }; });
+      var subNow = patch.sub !== undefined ? patch.sub : (item === s.item ? s.sub : defaultSub(item));
+      var ser = item === 'pipe' && subNow === 'SUS' && st.master.sizes.Su ? 'Su' : k.series;
+      r.sizes.forEach(function (z) { if ((st.master.sizes[ser] || []).some(function (x) { return x.n === z.n; })) ent[String(z.n)] = { g: z.g }; });
       patch.ent = ent;
     }
     if (r.rq && k && !k.series) patch.rq = r.rq;
@@ -648,7 +709,6 @@
       '<button type="button" data-act="loadSk">保温積算資料（単価表）を読み込む</button>' +
       '<button type="button" data-act="reload">シートを読み直す</button>' +
       '<button type="button" data-act="autoOpen">' + (st.autoOpen ? '✓ ' : '') + 'このブックを開いたら自動で表示</button>' +
-      '<button type="button" data-act="exportMemo">手入力した単価を書き出す（' + st.memo.list.length + '件）</button>' +
       '<button type="button" data-act="exportSpecs">仕様候補の変更を書き出す（' + (st.specLocal.add.length + Object.keys(st.specLocal.hide).length + Object.keys(st.specLocal.pin).length) + '件）</button>' +
       '<div class="ver">内訳アシスト v' + VERSION + '／Excel API ' + (st.api19 ? '1.9以上' : st.api17 ? '1.7以上' : '1.7未満') + '</div></div>';
   }
@@ -676,13 +736,16 @@
   }
   function step1() {
     var s = st.sel, al = areas();
-    var ah = al.map(function (a) { return chip('area', a.row, a.label, !s.newArea && a.row === s.areaRow); }).join('') +
+    var noA = s.noArea && !s.newArea;
+    var ah = al.map(function (a) { return chip('area', a.row, a.label, !s.newArea && !noA && a.row === s.areaRow); }).join('') +
+      chip('noArea', '1', '大項目なし', noA, ' title="大項目・系統は書かずに、施工箇所と仕様の行から書きます"') +
       chip('newArea', '1', '＋新しい大項目', s.newArea);
     var na = s.newArea ? '<div class="row newarea"><span class="anum" title="番号は自動で付きます">' + areaNumNext() + '.</span><input class="in" data-f="newAreaName" value="' + esc(stripNum(s.newAreaName)) + '" placeholder="例）配管設備" aria-label="新しい大項目の名前（番号は自動）"></div>' : '';
     var sh = sysList().map(function (b) { return chip('sys', b, b || '（系統なし）', b === s.sys); }).join('');
-    return '<section class="st">' + stepHead('01', '区分・系統', 'A列・B列', true) +
+    return '<section class="st">' + stepHead('01', '区分・系統', noA ? '大項目なし' : 'A列・B列', true) +
       '<div class="lbl">大項目</div><div class="chips">' + ah + '</div>' + na +
-      '<div class="lbl">系統</div><div class="chips">' + sh + '</div></section>';
+      (noA ? '<div class="hint">大項目・系統の行は書かず、施工箇所（C列）と仕様（E列）の行から書きます。同じ施工箇所・仕様が最後の大項目の後ろにあれば、そこに追加します。</div>'
+        : '<div class="lbl">系統</div><div class="chips">' + sh + '</div>') + '</section>';
   }
   function step2() {
     var s = st.sel;
@@ -697,11 +760,18 @@
     }).join('');
     var subs = subsOf(s.item), sub = '';
     if (subs.length) {
-      sub = '<div class="subbox"><div class="subhd"><b>' + esc(k && k.subTitle || '種別') + '</b>' +
+      var subT = s.item === 'pipe' ? '管の種類（D列）' : (k && k.subTitle || '種別');
+      if (s.item === 'valve' || s.item === 'flange') subT += '　押してからサイズを選ぶ（複数の種類をまとめて登録できます）';
+      sub = '<div class="subbox"><div class="subhd"><b>' + esc(subT) + '</b>' +
         ((s.item === 'rect' || s.item === 'round') ? chip('t16', '1', '(1.6t)', s.t16) : '') + '</div><div class="chips">' +
-        subs.map(function (x) { return chip('sub', x.id, x.label, x.id === s.sub, x.tip ? ' title="' + esc(x.tip) + '"' : ''); }).join('') + '</div></div>';
+        subs.map(function (x) {
+          var n = (s.item === 'valve' || s.item === 'flange') ? Object.keys(s.vent || {}).filter(function (kk) { return kk.split('|')[0] === x.id; }).length : 0;
+          return chip('sub', x.id, x.label + (n ? '（' + n + '）' : ''), x.id === s.sub, x.tip ? ' title="' + esc(x.tip) + '"' : '');
+        }).join('') + '</div></div>';
     }
-    var elb = s.item === 'pipe' ? '<div class="elb"><span>エルボ・チーズ 1式（任意）</span><input class="in num" data-f="elbow" value="' + esc(s.elbow) + '" placeholder="金額" aria-label="エルボ・チーズの金額"><span>円</span></div>' : '';
+    var rate = (st.master.output && st.master.output.elbowRate) || 0.35;
+    var elb = s.item === 'pipe' ? '<div class="elb"><button type="button" class="chip elbtn' + (st.ui.elbowOn ? ' on' : '') + '" data-act="elbow" aria-pressed="' + st.ui.elbowOn + '">' + (st.ui.elbowOn ? '✓ ' : '＋ ') + 'エルボ 1式</button>' +
+      '<span class="hint">J列＝直管の金額の合計×' + rate + '（10円単位で切り上げ）。同じ塊に既にあれば、範囲だけ直します</span></div>' : '';
     return '<section class="st">' + stepHead('03', '品目', 'D列・E列', true) + '<div class="tiles">' + tiles + '</div>' + sub + elb + '</section>';
   }
   // 仕様を「保温材」と「外装・仕上げ」の2つの列に分けて、縦にそろえて見せる
@@ -798,6 +868,7 @@
   function step5() {
     var s = st.sel, k = kind(), h = [];
     if (!k) return '';
+    if (s.item === 'valve' || s.item === 'flange') return step5Valve();
     var d = dOf();
     var tl = (st.master.output && st.master.output.thickList) || ['20', '25', '30', '40', '50', '65', '75'];
     h.push('<div class="thick"><span class="lbl">保温厚</span>' + ['（標準）'].concat(tl).map(function (t) {
@@ -805,7 +876,8 @@
       return '<button type="button" class="tk' + (on ? ' on' : '') + '" data-act="thick" data-v="' + v + '" aria-pressed="' + on + '" title="' + (v ? '選んでいるサイズの保温厚を ' + v + 'mm にします' : 'サイズごとの標準の保温厚（M_標準厚）') + '">' + esc(v ? v : '標準') + '</button>';
     }).join('') + '</div>');
     if (k.series) {
-      var sizes = st.master.sizes[k.series] || [];
+      var sizes = st.master.sizes[seriesOf()] || [];
+      if (seriesOf() === 'Su') h.push('<div class="hint">ステンレス管（D列に SUS）。単価は外径が同じ鋼管のサイズで引きます（例 20Su→15A。M_サイズ で変更可）</div>');
       h.push('<div class="sizes">' + sizes.map(function (z) {
         var key = String(z.n), on = !!s.ent[key], g = on ? U.num(s.ent[key].g) : 0;
         return '<button type="button" class="size' + (on ? ' on' : '') + '" data-act="size" data-v="' + key + '" aria-pressed="' + on + '"><b>' + esc(z.n) + '</b>' + (g > 0 ? '<small>' + U.fmtQ(g) + '</small>' : '') + '</button>';
@@ -819,7 +891,7 @@
           var lp = priceOf(d, s.spec, z.n, U.thickKey(fShown));
           var manual = en.i !== undefined, price = manual ? (en.i === '' ? null : U.num(en.i)) : lp.p, g = U.num(en.g);
           var cap = manual ? ['手入力', 'c-info'] : lp.cap;
-          h.push('<div class="qr"><span class="sz">' + esc(k.series === 'A' ? z.n + 'A' : 'φ' + z.n) + '</span>' +
+          h.push('<div class="qr"><span class="sz">' + esc(sizeText(z.n)) + '</span>' +
             '<input class="in num c" tabindex="-1" data-f="ent.f" data-k="' + key + '" value="' + esc(fShown) + '" aria-label="' + key + 'の保温厚">' +
             '<input class="in num" data-f="ent.g" data-k="' + key + '" value="' + esc(en.g) + '" placeholder="数量" aria-label="' + key + 'の数量">' +
             '<span class="pc"><input class="in num' + (price == null ? ' bad' : '') + '" tabindex="-1" data-f="ent.i" data-k="' + key + '" value="' + esc(manual ? en.i : (lp.p != null ? lp.p : '')) + '" placeholder="未登録" aria-label="' + key + 'の単価"><small class="' + cap[1] + '" title="' + esc(manual ? '' : lp.tip || '') + '">' + esc(cap[0]) + '</small></span>' +
@@ -851,6 +923,32 @@
     var ok = buildLines().length > 0;
     return '<section class="st">' + stepHead('05', k.series ? '保温厚・サイズ・数量' : '保温厚・数量', 'E・F・G・I列', ok) + h.join('') + (k.series && sel && sel.length ? '<div class="hint">数量の欄で Enter＝次のサイズへ、Ctrl＋Enter＝前のサイズへ</div>' : '') + '</section>';
   }
+  // バルブ・フランジ：種類とサイズを選ぶと、保温厚（配管から）・単位・単価（協会単価）が入る。数量は入れない
+  function step5Valve() {
+    var s = st.sel, h = [], sizes = st.master.sizes.A || [];
+    var cur = subsOf(s.item).filter(function (x) { return x.id === s.sub; })[0];
+    h.push('<div class="lbl">' + esc(cur ? cur.label : '種類') + ' のサイズ</div><div class="sizes">' + sizes.map(function (z) {
+      var on = !!s.vent[ventKey(s.sub, z.n)];
+      return '<button type="button" class="size' + (on ? ' on' : '') + '" data-act="size" data-v="' + z.n + '" aria-pressed="' + on + '"><b>' + esc(z.n) + '</b></button>';
+    }).join('') + '</div>');
+    var list = ventList();
+    if (list.length) {
+      h.push('<div class="qtab vt"><div class="qh"><span>種類</span><span>サイズ</span><span>保温厚</span><span>単位</span><span>単価</span><span></span></div>');
+      list.forEach(function (v) {
+        var r = ventRow(v), cap = r.manual ? ['手入力', 'c-info'] : r.pr.cap;
+        var tTip = '配管 ' + r.vt.pipe + 'mm（' + r.vt.from + '）→ ' + r.vt.f + 'mm';
+        h.push('<div class="qr"><span class="vd">' + esc(v.sub.label) + '</span><span class="sz">' + esc(v.z.n + 'A') + '</span>' +
+          '<input class="in num c" data-f="vent.f" data-k="' + esc(v.key) + '" value="' + esc(r.f) + '" title="' + esc(tTip) + '" aria-label="保温厚">' +
+          '<span class="un">' + esc(unitOf()) + '</span>' +
+          '<span class="pc"><input class="in num' + (r.i == null ? ' bad' : '') + '" data-f="vent.i" data-k="' + esc(v.key) + '" value="' + esc(r.manual ? v.en.i : (r.pr.p != null ? r.pr.p : '')) + '" placeholder="協会単価なし" aria-label="単価"><small class="' + cap[1] + '" title="' + esc(r.manual ? '' : r.pr.tip || '') + '">' + esc(cap[0]) + '</small></span>' +
+          '<button type="button" class="x" tabindex="-1" data-act="vdel" data-v="' + esc(v.key) + '" aria-label="外す">×</button></div>');
+      });
+      h.push('</div>');
+      var lt = (st.master.output && st.master.output.valveThick) || [25, 50];
+      h.push('<div class="hint">数量（G列）は空欄で登録します。内訳に直接入力してください。保温厚は同じ施工箇所・仕様の配管（直管）の保温厚から（' + lt.map(function (x, i) { return (i ? '' : '') + x + 'mm以下→' + x; }).join('、') + '）。</div>');
+    } else h.push('<div class="empty">種類を押してからサイズを押して追加（数量は入れません）</div>');
+    return '<section class="st">' + stepHead('05', '種類・サイズ', 'D・E・F・H・I列', list.length > 0) + h.join('') + '</section>';
+  }
   function planTitle(p) {
     var s = st.sel, where = s.sys || curAreaName();
     if (p.mode === 'row') {
@@ -858,6 +956,7 @@
       return p.atRow + '行目に入れる' + (cx ? '（' + cx + ' の中）' : '') + (p.headAdded ? '・仕様の行も入れます' : '');
     }
     if (p.mode === 'sub') return p.how === 'merge' ? '同じ区分・仕様の塊（同じサイズは数量を足す）' : '同じ区分・仕様の明細の下に追加';
+    if (p.mode === 'noarea') return '大項目なしで、施工箇所・仕様の行から末尾に作成';
     return p.mode === 'newsub' ? where + ' に新しい仕様の塊を作成' : p.mode === 'newsys' ? curAreaName() + ' に系統「' + s.sys + '」を作成' : '大項目「' + curAreaName() + '」を新しく作成';
   }
   // 登録先の入れ方（操作者が選ぶ）
@@ -883,23 +982,27 @@
     var t = planTitle(p);
     var rows = [];
     p.W.forEach(function (x) {
-      if (!(x.isNew || x.addG || x.addJ)) return;
-      var desc;
+      if (!(x.isNew || x.addG || x.addJ || x.elbowSet)) return;
+      var desc, jc = colsOf().j;
       if (x.t === 'area') desc = x.a; else if (x.t === 'sys') desc = x.b;
       else if (x.t === 'spec') desc = (x.c ? '(' + x.c + ') ' : '') + '(' + x.e + ')';
-      else if (x.t === 'line') desc = (x.isNew ? (x.dShow ? x.dShow + ' ' : '') : (x.d ? x.d + ' ' : '')) + x.e + '　' + (x.f ? 't' + x.f + '　' : '') + (x.addG ? U.fmtQ(x.g) + '＋' + U.fmtQ(x.addG) : U.fmtQ(x.g)) + x.h + '　' + (x.i == null ? '単価未登録' : '@' + U.yen(x.i));
-      else if (x.t === 'elbow') desc = 'エルボ・チーズ 1式　¥' + U.yen(x.isNew ? x.j : x.j + x.addJ) + (x.addJ ? '（＋' + U.yen(x.addJ) + '）' : '');
+      else if (x.t === 'line') desc = (x.isNew ? (x.dShow ? x.dShow + ' ' : '') : (x.d ? x.d + ' ' : '')) + x.e + '　' + (x.f ? 't' + x.f + '　' : '') +
+        (x.g === '' ? '数量は手入力　' + x.h : (x.addG ? U.fmtQ(x.g) + '＋' + U.fmtQ(x.addG) : U.fmtQ(x.g)) + x.h) + '　' + (x.i == null ? '協会単価なし' : '@' + U.yen(x.i));
+      else if (x.t === 'elbow') desc = (x.e || 'エルボ') + ' 1式　' + (x.runFrom ? jc + x.runFrom + '〜' + jc + x.runTo + '×' + x.rateUsed + '（切上げ10円）' + (x.jEst != null ? ' ≒¥' + U.yen(x.jEst) : '') : '');
       else if (x.t === 'total') desc = x.label;
       else desc = '';
-      var tag = !x.isNew ? '<span class="tag">数量を足す</span>' : x.restore ? '<span class="tag">元の仕様に戻す</span>' : '';
+      var tag = x.elbowSet && !x.isNew ? '<span class="tag">式の範囲を直す</span>' : !x.isNew ? '<span class="tag">数量を足す</span>' : x.restore ? '<span class="tag">元の仕様に戻す</span>' : '';
       rows.push('<div class="pr' + (x.isNew ? '' : ' mg') + '"><span class="rn">' + x.finalRow + '</span><span class="pd">' + esc(desc) + '</span>' + tag + '</div>');
     });
+    var notes = [];
+    if (p.elbowNote) notes.push(p.elbowNote);
+    if (p.elbowSkipped) notes.push('エルボは、上に直管が無いので入れません');
     return '<section class="plan' + (st.ui.how === 'row' ? ' man' : '') + '"><div class="pt"><b>登録先</b>　' + esc(t) + '（' + (p.firstRow === p.lastRow ? p.firstRow + '行目' : p.firstRow + '〜' + p.lastRow + '行目') + '）</div>' +
-      howView() + '<div class="prs">' + rows.join('') + '</div></section>';
+      howView() + '<div class="prs">' + rows.join('') + '</div>' + (notes.length ? '<div class="hint warn">' + esc(notes.join('。')) + '</div>' : '') + '</section>';
   }
   function footView() {
     var p = currentPlan(), ok = p && p.ok && st.headerOK;
-    return '<footer class="ft"><div class="sum"><span>追加 <b>' + (p && p.ok ? p.addCount : 0) + '</b>行・加算 <b>' + (p && p.ok ? p.mergeCount : 0) + '</b>行</span>' +
+    return '<footer class="ft"><div class="sum"><span>追加 <b>' + (p && p.ok ? p.addCount : 0) + '</b>行' + (p && p.ok && p.mergeCount ? '・加算 <b>' + p.mergeCount + '</b>行' : '') + (p && p.ok && p.fixCount ? '・式の修正 <b>' + p.fixCount + '</b>' : '') + '</span>' +
       '<strong>＋¥' + U.yen(p && p.ok ? p.addAmount : 0) + '</strong></div>' +
       '<div class="btns"><button type="button" class="ghost" data-act="locate"' + (ok ? '' : ' disabled') + ' title="登録する前に、書き込む位置をシート上で選択して見せます（シートは変わりません）">位置を確認</button>' +
       '<button type="button" class="cta" data-act="register"' + (ok && !st.ui.busy ? '' : ' disabled') + '>' + (st.ui.busy ? '処理中…' : '内訳に登録') + '</button></div></footer>';
@@ -931,8 +1034,11 @@
         case 'reload': refreshSheets().then(render); return;
         case 'autoOpen': setAutoOpen(!st.autoOpen); return;
         case 'exportMemo': exportMemo(); return;
-        case 'area': normalizeSel({ areaRow: +v, newArea: false, specAuto: true, custom: '' }); break;
-        case 'newArea': normalizeSel({ newArea: true, newAreaName: s.newAreaName || nextAreaName(kind() ? kind().fam : 'pipe'), specAuto: true, custom: '' }); break;
+        case 'area': normalizeSel({ areaRow: +v, newArea: false, noArea: false, specAuto: true, custom: '' }); break;
+        case 'newArea': normalizeSel({ newArea: true, noArea: false, newAreaName: s.newAreaName || nextAreaName(kind() ? kind().fam : 'pipe'), specAuto: true, custom: '' }); break;
+        case 'noArea': normalizeSel({ noArea: true, newArea: false, sys: '', specAuto: true, custom: '' }); break;
+        case 'elbow': st.ui.elbowOn = !st.ui.elbowOn; saveUi(); break;
+        case 'vdel': { var vv = Object.assign({}, s.vent); delete vv[v]; s.vent = vv; st.ui.noRestore = true; break; }
         case 'sys': normalizeSel({ sys: v, specAuto: true, custom: '' }); break;
         case 'place': normalizeSel({ place: v, specAuto: true, custom: '' }); break;
         case 'item': normalizeSel({ item: v, specAuto: true, custom: '' }); break;
@@ -996,6 +1102,11 @@
         }
         case 'exportSpecs': exportSpecs(); return;
         case 'size': {
+          if (s.item === 'valve' || s.item === 'flange') {
+            var ve = Object.assign({}, s.vent), vk = ventKey(s.sub, v);
+            if (ve[vk]) delete ve[vk]; else ve[vk] = {};
+            s.vent = ve; st.ui.noRestore = true; break;
+          }
           var e = Object.assign({}, s.ent);
           if (e[v]) delete e[v]; else e[v] = { g: '' };
           if (e[v] && s.tSel) e[v].f = s.tSel;
@@ -1010,7 +1121,7 @@
           if (p) {
             var ar = areas().filter(function (x) { return U.trimAll(x.name) === U.trimAll(p.area); })[0];
             var patch = { item: p.item, sub: p.sub, place: p.place, sys: p.sys, specAuto: true, custom: '' };
-            if (ar) { patch.areaRow = ar.row; patch.newArea = false; } else { patch.newArea = true; patch.newAreaName = stripNum(p.area); }
+            if (ar) { patch.areaRow = ar.row; patch.newArea = false; patch.noArea = false; } else if (p.area) { patch.newArea = true; patch.noArea = false; patch.newAreaName = stripNum(p.area); } else { patch.noArea = true; patch.newArea = false; }
             normalizeSel(patch);
             if (p.sys !== undefined) st.sel.sys = sysList().indexOf(p.sys) >= 0 ? p.sys : st.sel.sys;
             normalizeSel();
@@ -1025,7 +1136,8 @@
             if (pa && pa.ok && pa.news.length) st.ui.atRow = String(Math.min.apply(null, pa.news.map(function (x) { return x.finalRow; })));
           }
           st.ui.how = v;
-          if (v !== 'row') save(K_UI, { how: v });
+          if (v !== 'row') st.ui.howSaved = v;
+          saveUi();
           break;
         }
         case 'atSel': pickRow(v === 'below'); return;
@@ -1074,7 +1186,6 @@
     if (f === 'target') return;
     if (f === 'cmd') { s.cmd = v; if (!silent) onCmd(v); }
     else if (f === 'newAreaName') { s.newAreaName = stripNum(v); if (!silent) normalizeSel({ specAuto: true }); }
-    else if (f === 'elbow') s.elbow = v;
     else if (f === 'atRow') st.ui.atRow = v;
     else if (f === 'custom') { s.custom = v; if (!silent) normalizeSel(v ? { spec: U.normSpec(v), specAuto: false } : { specAuto: true }); }
     else if (f === 'specNew') { st.ui.newSpec = v; }
@@ -1083,6 +1194,7 @@
     else if (f === 'rq') s.rq = v;
     else if (f === 'rf') s.rf = v;
     else if (f === 'ri') s.ri = v;
+    else if (f.indexOf('vent.') === 0) { var vf = f.slice(5), ve2 = Object.assign({}, s.vent); ve2[k] = Object.assign({}, ve2[k]); ve2[k][vf] = v; s.vent = ve2; }
     else if (f.indexOf('ent.') === 0) { var fld = f.slice(4); var e = Object.assign({}, s.ent); e[k] = Object.assign({}, e[k]); e[k][fld] = v; s.ent = e; }
     else if (f.indexOf('dim.') === 0) { var dk = f.slice(4); s.dims = s.dims.map(function (d, i) { return i === +k ? Object.assign({}, d, (function () { var o = {}; o[dk] = v; return o; })()) : d; }); }
     if (!silent) render();

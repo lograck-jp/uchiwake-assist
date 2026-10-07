@@ -57,6 +57,9 @@
   UA.PIECE_UNITS = PIECE_UNITS;
   var KIND_OF_ITEM = { pipe: 'pipe', valve: 'valve', flange: 'valve', rect: 'rect', round: 'round', box: 'box' };
   UA.KIND_OF_ITEM = KIND_OF_ITEM;
+  // ステンレス管の呼び径（Su）→ 単価を引く鋼管の呼び径（A）。外径が同じ（20Su・25Su は一つ小さいA）
+  var SU_DEFAULT = [[13, 10], [20, 15], [25, 20], [30, 25], [40, 32], [50, 40], [60, 50], [75, 65], [80, 80], [100, 100], [125, 125], [150, 150], [200, 200], [250, 250], [300, 300]];
+  UA.SU_DEFAULT = SU_DEFAULT;
   var DEFAULT_THICK = { pipe: '20', valve: '25', rect: '25', round: '25', box: '25' };
 
   /* ========== 設定マスタ ========== */
@@ -98,6 +101,8 @@
       if (!k || !d) return;
       (m.subs[k] = m.subs[k] || []).push({ id: d === '（なし）' ? '' : d, label: d, tip: str(pick(r, '説明')), use: useOK(pick(r, '使用する')), order: num(pick(r, '表示順')) });
     });
+    if (!m.subs.pipe) m.subs.pipe = [{ id: '', label: '鋼管', tip: 'D列は空欄', use: true, order: 1 }, { id: 'SUS', label: 'SUS', tip: 'ステンレス管（D列に SUS）', use: true, order: 2 }];
+    m.subs.pipe.forEach(function (x) { if (x.id === '' && (x.label === '（なし）' || !x.label)) x.label = '鋼管'; });
     Object.keys(m.subs).forEach(function (k) { m.subs[k].sort(bySort); });
 
     rows('M_施工箇所').forEach(function (r) {
@@ -119,8 +124,11 @@
       var s = str(pick(r, '系列')); s = (s === 'Φ') ? 'φ' : s;
       var n = pick(r, 'サイズ');
       if (!s || isEmpty(n) || !useOK(pick(r, '使用する'))) return;
-      (m.sizes[s] = m.sizes[s] || []).push({ n: num(n), label: str(pick(r, 'ボタンの表示')) || (s === 'A' ? num(n) + 'A' : 'φ' + num(n)), order: num(pick(r, '表示順')) });
+      var ps = pick(r, '単価に使うサイズ');
+      (m.sizes[s] = m.sizes[s] || []).push({ n: num(n), label: str(pick(r, 'ボタンの表示')) || (s === 'A' ? num(n) + 'A' : s === 'Su' ? num(n) + 'Su' : 'φ' + num(n)), order: num(pick(r, '表示順')), priceSize: isEmpty(ps) ? null : num(ps) });
     });
+    // ステンレス管（Su）：マスタに無ければ既定。単価は外径が同じ鋼管（A）の行で引く
+    if (!m.sizes.Su) m.sizes.Su = SU_DEFAULT.map(function (x) { return { n: x[0], label: x[0] + 'Su', order: 0, priceSize: x[1] }; });
     Object.keys(m.sizes).forEach(function (k) { m.sizes[k].sort(function (a, b) { return a.n - b.n; }); });
 
     rows('M_仕様候補').forEach(function (r) {
@@ -151,7 +159,7 @@
     var cols = { area: 'A', sys: 'B', place: 'C', d: 'D', spec: 'E', size: 'E', f: 'F', g: 'G', h: 'H', i: 'I', j: 'J', label: 'I' };
     var refCols = { y: 'Y', z: 'Z', aa: 'AA', ab: 'AB' };
     var REFKEY = { '単価の参照元': 'y', '参照した仕様': 'z', '参照したサイズ': 'aa', '参照した厚み': 'ab' };
-    var out = { cols: cols, refCols: refCols, priceSrc: '保温積算資料', skFactor: 1, makeTotals: false, thickList: ['20', '25', '30', '40', '50', '65', '75'], startRow: 5, amountTpl: '=IF(AND(G{行}<>"",I{行}=""),0,IF(AND(G{行}="",I{行}=""),"",IF(AND(G{行}<>"",I{行}<>""),G{行}*I{行},"")))' };
+    var out = { cols: cols, refCols: refCols, priceSrc: '保温積算資料', skFactor: 1, makeTotals: false, elbowRate: 0.35, elbowLabel: 'エルボ', valveThick: [25, 50], thickList: ['20', '25', '30', '40', '50', '65', '75'], startRow: 5, amountTpl: '=IF(AND(G{行}<>"",I{行}=""),0,IF(AND(G{行}="",I{行}=""),"",IF(AND(G{行}<>"",I{行}<>""),G{行}*I{行},"")))' };
     var MAPKEY = { '大項目': 'area', '系統': 'sys', '施工箇所': 'place', '種別': 'd', '仕様': 'spec', 'サイズ': 'size', '保温厚': 'f', '数量': 'g', '単位': 'h', '単価': 'i', '金額': 'j', '系統計（ラベル）': 'label' };
     (sheets['M_出力設定'] || []).forEach(function (r) {
       var k = str(pick(r, '項目')), c = trimAll(pick(r, '列')), v = str(pick(r, '書き込む内容'));
@@ -163,6 +171,9 @@
       if (k === '計の行を作る') out.makeTotals = /する|○/.test(v) && !/しない/.test(v);
       if (k === '保温厚の候補' && v) out.thickList = String(v).split(/[、,，\s]+/).map(function (x) { return thickKey(x); }).filter(Boolean);
       if (k === '保温積算資料の掛率' && num(v) > 0) out.skFactor = num(v);
+      if (k === 'エルボの率' && num(v) > 0) out.elbowRate = num(v);
+      if (k === 'エルボの表記' && v) out.elbowLabel = v;
+      if (k === 'バルブ・フランジの保温厚' && v) out.valveThick = String(v).split(/[、,，\s]+/).map(function (x) { return num(x); }).filter(function (x) { return x > 0; }).sort(function (a, b) { return a - b; });
     });
     // 保温積算資料の対応表・加算（シートがあればそれを使う。無ければ既定）
     if (sheets['M_積算資料対応']) {
@@ -749,7 +760,7 @@
     return String(tbl.comp || '').replace(/^構成[:：]\s*/, '').split('/').map(function (x) { return x.trim().replace(/^\d+\./, ''); })
       .filter(function (x) { return x && x.charAt(0) !== '※' && !/^厚み/.test(x); }).join('/');
   }
-  function ceil10(x) { return Math.ceil(x / 10 - 1e-9) * 10; }
+  function ceil10(x) { return (Math.ceil(x / 10 - 1e-9) * 10) || 0; }
   function fmtN(x) { return Math.round(x * 1e6) / 1e6; }
 
   // 単価を引く。q = { item, d, place, spec, size, f }
@@ -909,9 +920,10 @@
       }
       var hT = trimAll(H);
       if (typeof E === 'string' && /エルボ|チーズ|継手/.test(E) && hT === '式') {
-        rec.t = 'elbow'; rec.e = String(E).trim(); rec.g = num(G); rec.h = hT; rec.j = num(J); recs.push(rec); continue;
+        rec.t = 'elbow'; rec.e = String(E).trim(); rec.g = num(G); rec.h = hT; rec.j = num(J); rec.jf = fcell(r, 'j'); recs.push(rec); continue;
       }
-      if (!isEmpty(G) && isNumLike(G)) {
+      // 明細：数量あり。バルブ・フランジは数量を空欄で書くことがある（単位が入っていれば明細とみなす）
+      if ((!isEmpty(G) && isNumLike(G)) || (isEmpty(G) && !isEmpty(H) && (typeof E === 'number' || isNumLike(E)))) {
         rec.t = 'line';
         rec.dRaw = isEmpty(D) ? '' : String(D).trim();
         if (rec.dRaw) { rec.d = rec.dRaw; lastD = rec.dRaw; }
@@ -1032,6 +1044,35 @@
     return foundSame || found;
   };
 
+  // 今の区分（大項目・系統・施工箇所・仕様）の塊にある明細行
+  UA.blockLines = function (model, sel) {
+    if (!model) return [];
+    var W = model.recs, sub = null, i;
+    if (sel.noArea && !sel.newArea) {
+      var s0 = 0; for (i = 0; i < W.length; i++) if (W[i].t === 'area') s0 = i + 1;
+      sub = findSub(W, s0, W.length, sel.place, sel.spec);
+    } else {
+      if (sel.newArea) return [];
+      var ai = findArea(W, sel.area, sel.areaRow);
+      if (ai < 0) return [];
+      var sr = sysRange(W, ai, areaEnd(W, ai), sel.sys);
+      if (!sr) return [];
+      sub = findSub(W, sr.s + (sel.sys ? 0 : 1), sr.e, sel.place, sel.spec);
+    }
+    if (!sub) return [];
+    var out = [], k = W.indexOf(sub) + 1;
+    while (k < W.length && (W[k].t === 'line' || W[k].t === 'elbow')) { if (W[k].t === 'line') out.push(W[k]); k++; }
+    return out;
+  };
+  // バルブ・フランジの保温厚：配管の保温厚以上で一番近い候補（既定 25・50）。候補より厚ければ配管と同じ
+  UA.valveThick = function (pipeT, list) {
+    var parts = String(pipeT == null ? '' : pipeT).split(/[+＋]/).map(function (x) { return parseFloat(toHalf(x)); }).filter(function (x) { return isFinite(x); });
+    if (!parts.length) return '';
+    var tot = parts.reduce(function (a, b) { return a + b; }, 0), L = list && list.length ? list : [25, 50];
+    for (var i = 0; i < L.length; i++) if (tot <= L[i]) return String(L[i]);
+    return thickKey(pipeT);
+  };
+
   /* ========== 登録計画 ==========
      sel = { area, newArea(bool), sys('' = 系統なし), place, spec, item, lines:[{d,e,f,g,h,i,src}], elbow:金額,
              how: 'add'（今ある行は変えず、同じ塊の明細の下に追加。既定）| 'merge'（同じサイズの行は数量を足す）| 'row'（atRow 行目に入れる） }
@@ -1046,9 +1087,9 @@
       if (ar < model.startRow) { res.message = model.startRow + '行目より上には入れられません'; return res; }
       if (model.boundary && ar > model.boundary.row) { res.message = '「' + model.boundary.text + '」（' + model.boundary.row + '行目）より下には入れられません'; return res; }
     }
-    if (!sel.lines.length && !(sel.elbow > 0)) { res.message = '数量を入れると、ここに登録先が表示されます'; return res; }
+    if (!sel.lines.length && !sel.elbow) { res.message = (sel.item === 'valve' || sel.item === 'flange') ? '種類とサイズを選ぶと、ここに登録先が表示されます' : '数量を入れると、ここに登録先が表示されます'; return res; }
     if (!sel.spec) { res.message = '仕様を選んでください'; return res; }
-    if (!sel.area && how !== 'row') { res.message = '大項目を選ぶか、新しい大項目を入力してください'; return res; }
+    if (!sel.area && !sel.noArea && how !== 'row') { res.message = '大項目を選ぶか、「大項目なし」を選んでください'; return res; }
     var base = model.recs.map(function (r) { return Object.assign({}, r); });
     if (how === 'row') { var WR = planAtRow(model, base, sel, ar, res); return WR ? finishPlan(res, model, WR) : res; }
     // 末尾の目印（この行の上に差し込む）
@@ -1063,15 +1104,29 @@
     base.push({ t: 'end', row: endRow });
 
     var W = base;
-    var lines = sel.lines.map(function (l) { return Object.assign({ t: 'line', isNew: true }, l); });
-    if (sel.item === 'pipe' && sel.elbow > 0) lines.push({ t: 'elbow', isNew: true, e: 'エルボ・チーズ', g: 1, h: '式', j: sel.elbow });
-    var fam = famOfArea(sel.area);
+    var lines = newLines(sel);
     var ai = sel.newArea ? -1 : findArea(W, sel.area, sel.areaRow);
     var i, p;
     function splice(at, arr) { Array.prototype.splice.apply(W, [at, 0].concat(arr)); }
     function nb(t, o) { return Object.assign({ t: t, isNew: true }, o || {}); }
 
-    if (ai < 0) {
+    if (sel.noArea && !sel.newArea) {
+      // 大項目なし：最後の大項目より後ろ（大項目が無いシートは全体）で、同じ施工箇所・仕様の塊を探す。無ければ末尾に作る
+      var s0 = 0;
+      for (i = 0; i < W.length; i++) if (W[i].t === 'area') s0 = i + 1;
+      var e0 = W.length - 1;
+      var sub0 = findSub(W, s0, e0, sel.place, sel.spec);
+      if (sub0) { insertIntoSub(W, sub0, lines, how === 'merge'); res.mode = 'sub'; }
+      else {
+        p = e0;
+        for (i = s0; i < e0; i++) if (W[i].t === 'total' && W[i].scope === 'grand') { p = i; break; }
+        while (p - 1 >= s0 && W[p - 1].t === 'blank') p--;
+        var blk0 = [nb('spec', { c: sel.place, d: '', e: sel.spec })].concat(lines);
+        if (W.slice(0, p).some(function (r) { return r.t !== 'blank'; })) blk0.unshift(nb('blank'));
+        splice(p, blk0);
+        res.mode = 'noarea';
+      }
+    } else if (ai < 0) {
       // 新しい大項目を末尾に作る
       p = W.length - 1; // end の前
       var hasPrev = W.some(function (r) { return r.t !== 'end' && r.t !== 'blank'; });
@@ -1124,6 +1179,16 @@
     return finishPlan(res, model, W);
   };
 
+  // 登録する明細（エルボは「直管の合計×率」の式で J列に入れる）
+  function newLines(sel) {
+    var lines = sel.lines.map(function (l) { return Object.assign({ t: 'line', isNew: true }, l); });
+    if (sel.item === 'pipe' && sel.elbow) lines.push({ t: 'elbow', isNew: true, e: sel.elbowLabel || 'エルボ', g: 1, h: '式', rate: sel.elbowRate || 0.35 });
+    return lines;
+  }
+  function isPiece(r) { return PIECE_UNITS.indexOf(trimAll(r.h)) >= 0; }
+  function isRunLine(r) { return r.t === 'line' && !isPiece(r); }   // 直管・ダクトなど（バルブ・フランジ以外）
+  UA.isPieceLine = isPiece;
+
   // 行を指定して入れる（how = 'row'）。大項目・系統はその行の位置のもの。仕様が違えば仕様の行（括弧書き）も入れる
   function planAtRow(model, base, sel, atRow, res) {
     var endRow = model.boundary ? model.boundary.row : Math.max(model.lastContent + 1, model.startRow, atRow);
@@ -1149,10 +1214,16 @@
       if (r2.t === 'area') { cx.area = r2.a; break; }
     }
     res.ctx = cx;
-    var lines = sel.lines.map(function (l) { return Object.assign({ t: 'line', isNew: true }, l); });
-    if (sel.item === 'pipe' && sel.elbow > 0) lines.push({ t: 'elbow', isNew: true, e: 'エルボ・チーズ', g: 1, h: '式', j: sel.elbow });
+    var lines = newLines(sel);
     var samePlace = trimAll(cx.place) === trimAll(sel.place);
     var needHead = cx.spec !== sel.spec || !samePlace;
+    // 同じ仕様の明細の中に入れるとき、その塊にエルボが既にあれば新しく作らない（範囲だけ直す）
+    if (!needHead) {
+      var hasElb = false;
+      for (k = idx; k < W.length && (W[k].t === 'line' || W[k].t === 'elbow'); k++) if (W[k].t === 'elbow') { hasElb = true; W[k].elbowRefresh = true; }
+      for (k = idx - 1; k >= 0 && (W[k].t === 'line' || W[k].t === 'elbow'); k--) if (W[k].t === 'elbow') { hasElb = true; W[k].elbowRefresh = true; }
+      if (hasElb) lines = lines.filter(function (x) { return x.t !== 'elbow'; });
+    }
     var blk = lines.slice();
     if (needHead) {
       var head = { t: 'spec', isNew: true, c: samePlace ? '' : sel.place, d: '', e: sel.spec };
@@ -1168,8 +1239,16 @@
     return W;
   }
 
+  var ELB_RE = /^=ROUNDUP\(SUM\(\$?([A-Z]+)\$?(\d+):\$?[A-Z]+\$?(\d+)\)\*([\d.]+),-1\)$/i;
+  function runAbove(W, idx) {
+    var k = idx - 1, out = [];
+    while (k >= 0 && isRunLine(W[k])) { out.unshift(W[k]); k--; }
+    return out;
+  }
   function finishPlan(res, model, W) {
     var i;
+    // 直管が上に無い新しいエルボは入れない
+    for (i = W.length - 1; i >= 0; i--) if (W[i].t === 'elbow' && W[i].isNew && !runAbove(W, i).length) { W.splice(i, 1); res.elbowSkipped = true; }
     // D列：同じ種別が続くときは最初の行だけ
     var cellOps = [];
     var prevLine = null;
@@ -1206,6 +1285,26 @@
     // 計の式の手当て
     var totalOps = [];
     var jc = model.cols.j;
+    // エルボ：J列＝ROUNDUP(SUM(すぐ上の直管のJ列)×率,-1)。既にある式のエルボは、直管を足したら範囲を直す
+    res.elbowNote = '';
+    W.forEach(function (x, idx) {
+      if (x.t !== 'elbow') return;
+      var cur = typeof x.jf === 'string' ? x.jf.replace(/\s/g, '') : '';
+      var mm = cur.match(ELB_RE);
+      if (!x.isNew && !mm) { if (x.elbowRefresh) res.elbowNote = 'エルボ（' + x.finalRow + '行目）は金額の手入力のままです'; return; }
+      var run = runAbove(W, idx);
+      if (!run.length) return;
+      var rate = x.rateNew || x.rate || (mm ? parseFloat(mm[4]) : 0.35);
+      var f = '=ROUNDUP(SUM(' + jc + run[0].finalRow + ':' + jc + run[run.length - 1].finalRow + ')*' + fmtN(rate) + ',-1)';
+      var sum = 0; run.forEach(function (r) { if (r.i != null && r.g > 0) sum += (r.g + (r.addG || 0)) * r.i; });
+      x.jEst = ceil10(sum * rate); x.rateUsed = rate; x.runFrom = run[0].finalRow; x.runTo = run[run.length - 1].finalRow;
+      if (x.isNew) { x.formula = f; return; }
+      var anyNew = run.some(function (r) { return r.isNew || r.addG; });
+      if (anyNew || x.elbowRefresh) {
+        totalOps.push({ type: 'set', finalRow: x.finalRow, origRow: x.row, formula: f, prev: x.jf, why: 'エルボの範囲' });
+        x.elbowSet = true;
+      }
+    });
     var reRange = new RegExp('^=SUM\\(\\s*\\$?' + jc + '\\$?(\\d+)\\s*:\\s*\\$?' + jc + '\\$?(\\d+)\\s*\\)$', 'i');
     W.forEach(function (x, idx) {
       if (x.t !== 'total') return;
@@ -1253,7 +1352,7 @@
 
     // 表示用の要約
     var news = W.filter(function (x) { return x.isNew; });
-    var merges = W.filter(function (x) { return !x.isNew && (x.addG || x.addJ); });
+    var merges = W.filter(function (x) { return !x.isNew && (x.addG || x.addJ || x.elbowSet); });
     var rowsTouched = news.map(function (x) { return x.finalRow; }).concat(merges.map(function (x) { return x.finalRow; }));
     res.ok = true;
     res.inserts = inserts.map(function (g) { return { at: g.at, count: g.recs.length, recs: g.recs }; }).sort(function (a, b) { return b.at - a.at; });
@@ -1262,12 +1361,13 @@
     res.W = W;
     res.news = news; res.merges = merges;
     res.addCount = news.filter(function (x) { return x.t === 'line' || x.t === 'elbow'; }).length;
-    res.mergeCount = merges.length;
+    res.mergeCount = merges.filter(function (x) { return x.addG || x.addJ; }).length;
+    res.fixCount = merges.filter(function (x) { return x.elbowSet; }).length;
     res.firstRow = rowsTouched.length ? Math.min.apply(null, rowsTouched) : null;
     res.lastRow = rowsTouched.length ? Math.max.apply(null, rowsTouched) : null;
     res.addAmount = 0;
-    news.forEach(function (x) { if (x.t === 'line' && x.i != null) res.addAmount += Math.round(x.g * x.i); if (x.t === 'elbow') res.addAmount += x.j; });
-    merges.forEach(function (x) { if (x.addG && x.i != null) res.addAmount += Math.round(x.addG * x.i); if (x.addJ) res.addAmount += x.addJ; });
+    news.forEach(function (x) { if (x.t === 'line' && x.i != null && x.g > 0) res.addAmount += Math.round(x.g * x.i); if (x.t === 'elbow') res.addAmount += x.jEst || 0; });
+    merges.forEach(function (x) { if (x.addG && x.i != null) res.addAmount += Math.round(x.addG * x.i); if (x.elbowSet && x.jEst != null) res.addAmount += x.jEst - (x.j || 0); });
     // 挿入の目印になる行（場所を見る用）
     res.anchorRow = res.inserts.length ? res.inserts[res.inserts.length - 1].at : (merges[0] ? merges[0].row : null);
     return res;
@@ -1279,49 +1379,46 @@
     lines.forEach(function (ln) {
       var st = W.indexOf(specRec) + 1, en = st, k;
       while (en < W.length && (W[en].t === 'line' || W[en].t === 'elbow')) en++;
-      if (!merge) {
-        var pos2 = -1;
-        if (ln.t === 'elbow') {
-          for (k = st; k < en; k++) if (W[k].t === 'elbow') pos2 = k + 1;
-          if (pos2 < 0) { pos2 = en; for (k = st; k < en; k++) if (W[k].t === 'line' && W[k].d !== '') { pos2 = k; break; } }
-        } else {
-          for (k = st; k < en; k++) if (W[k].t === 'line' && W[k].d === ln.d) pos2 = k + 1;
-          if (pos2 < 0) {
-            pos2 = en;
-            if (ln.d === '') for (k = st; k < en; k++) if (W[k].t === 'elbow' || (W[k].t === 'line' && W[k].d !== '')) { pos2 = k; break; }
+      // エルボ：塊に既にあれば作らず、その式の範囲を直す。無ければ直管の最後の下に入れる
+      if (ln.t === 'elbow') {
+        for (k = st; k < en; k++) if (W[k].t === 'elbow') { W[k].elbowRefresh = true; if (ln.rate) W[k].rateNew = ln.rate; return; }
+        var lastRun = -1;
+        for (k = st; k < en; k++) if (isRunLine(W[k])) lastRun = k;
+        W.splice(lastRun >= 0 ? lastRun + 1 : en, 0, ln);
+        return;
+      }
+      var hasQty = typeof ln.g === 'number' && ln.g > 0;
+      if (merge && hasQty) {
+        for (k = st; k < en; k++) {
+          var r = W[k];
+          if (r.t === 'line' && !r.isNew && r.d === ln.d && String(r.e) === String(ln.e) && String(r.f) === String(ln.f) && (r.h === ln.h || !r.h)) {
+            r.addG = (r.addG || 0) + ln.g; return;
           }
         }
-        W.splice(pos2, 0, ln);
-        return;
       }
-      if (ln.t === 'elbow') {
-        for (k = st; k < en; k++) if (W[k].t === 'elbow') { W[k].addJ = (W[k].addJ || 0) + ln.j; return; }
-        var pe = en;
-        for (k = st; k < en; k++) if (W[k].t === 'line' && W[k].d !== '') { pe = k; break; }
-        W.splice(pe, 0, ln);
-        return;
-      }
-      for (k = st; k < en; k++) {
-        var r = W[k];
-        if (r.t === 'line' && !r.isNew && r.d === ln.d && String(r.e) === String(ln.e) && String(r.f) === String(ln.f) && (r.h === ln.h || !r.h)) {
-          r.addG = (r.addG || 0) + ln.g; return;
+      var pos = -1, piece = isPiece(ln);
+      if (merge) {
+        // 同じ種別の中でサイズ順に入れる
+        var same = [];
+        for (k = st; k < en; k++) if (W[k].t === 'line' && W[k].d === ln.d && isPiece(W[k]) === piece) same.push(k);
+        if (same.length) {
+          pos = same[same.length - 1] + 1;
+          for (var q = 0; q < same.length; q++) {
+            var ev = W[same[q]].e;
+            if (typeof ev === 'number' && typeof ln.e === 'number' && ev > ln.e) { pos = same[q]; break; }
+          }
         }
       }
-      var same = [];
-      for (k = st; k < en; k++) if (W[k].t === 'line' && W[k].d === ln.d) same.push(k);
-      var pos;
-      if (same.length) {
-        pos = same[same.length - 1] + 1;
-        for (var q = 0; q < same.length; q++) {
-          var ev = W[same[q]].e;
-          if (typeof ev === 'number' && typeof ln.e === 'number' && ev > ln.e) { pos = same[q]; break; }
-        }
-      } else if (ln.d === '') {
-        pos = en;
-        for (k = st; k < en; k++) if (W[k].t === 'elbow' || (W[k].t === 'line' && W[k].d !== '')) { pos = k; break; }
-      } else {
-        pos = en;
+      if (pos < 0) {
+        // 今ある行は変えず、同じ種別の明細の一番下へ
+        for (k = st; k < en; k++) if (W[k].t === 'line' && W[k].d === ln.d && isPiece(W[k]) === piece) pos = k + 1;
       }
+      if (pos < 0 && !piece) {
+        // 直管・ダクト：ほかの直管の下（エルボ・バルブより上）
+        for (k = st; k < en; k++) if (isRunLine(W[k])) pos = k + 1;
+        if (pos < 0) { pos = en; for (k = st; k < en; k++) if (W[k].t === 'elbow' || (W[k].t === 'line' && isPiece(W[k]))) { pos = k; break; } }
+      }
+      if (pos < 0) pos = en;   // バルブ・フランジ：塊の一番下
       W.splice(pos, 0, ln);
     });
   }

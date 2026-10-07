@@ -256,3 +256,12 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .plan .hint { font-size: 10.5px; line-height: 1.5; color: var(--muted); }
 .plan.man { border-color: var(--acc); }
 .pr.mg { background: rgba(255, 196, 0, .16); }
+
+/* v1.3.0 エルボの切り替え・バルブ／フランジの一覧（数量なし） */
+.elb { flex-wrap: wrap; }
+.elb .elbtn { flex: none; }
+.elb .hint { flex: 1; min-width: 160px; }
+.qtab.vt .qh, .qtab.vt .qr { grid-template-columns: minmax(0, 1fr) 42px 44px 30px minmax(0, 1.3fr) 22px; }
+.qr .vd { font-size: 11.5px; font-weight: 700; line-height: 30px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.qr .un { font-size: 11px; line-height: 30px; text-align: center; color: var(--sub); }
+.plan .hint.warn { color: var(--warn); }
