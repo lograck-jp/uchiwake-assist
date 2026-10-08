@@ -1299,8 +1299,10 @@
       var sum = 0; run.forEach(function (r) { if (r.i != null && r.g > 0) sum += (r.g + (r.addG || 0)) * r.i; });
       x.jEst = ceil10(sum * rate); x.rateUsed = rate; x.runFrom = run[0].finalRow; x.runTo = run[run.length - 1].finalRow;
       if (x.isNew) { x.formula = f; return; }
-      var anyNew = run.some(function (r) { return r.isNew || r.addG; });
-      if (anyNew || x.elbowRefresh) {
+      // 行を入れたあと Excel が自動でずらした式と同じなら、書き直さない
+      var a0 = +mm[2], b0 = +mm[3];
+      var shifted = '=ROUNDUP(SUM(' + jc + (a0 + shiftAt(a0)) + ':' + jc + (b0 + shiftAt(b0)) + ')*' + fmtN(parseFloat(mm[4])) + ',-1)';
+      if (shifted.toUpperCase() !== f.toUpperCase()) {
         totalOps.push({ type: 'set', finalRow: x.finalRow, origRow: x.row, formula: f, prev: x.jf, why: 'エルボの範囲' });
         x.elbowSet = true;
       }
@@ -1354,6 +1356,7 @@
     var news = W.filter(function (x) { return x.isNew; });
     var merges = W.filter(function (x) { return !x.isNew && (x.addG || x.addJ || x.elbowSet); });
     var rowsTouched = news.map(function (x) { return x.finalRow; }).concat(merges.map(function (x) { return x.finalRow; }));
+    if (!news.length && !merges.length) { res.ok = false; res.message = res.elbowNote || 'エルボは入っています。数量を入れると、ここに登録先が表示されます'; return res; }
     res.ok = true;
     res.inserts = inserts.map(function (g) { return { at: g.at, count: g.recs.length, recs: g.recs }; }).sort(function (a, b) { return b.at - a.at; });
     res.cellOps = cellOps;
