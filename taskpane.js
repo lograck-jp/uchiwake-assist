@@ -5,7 +5,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '1.3.1';
+  var VERSION = '1.3.2';
   var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1', K_UI = 'uchiwake-assist.ui.v1';
   var HOW_LABEL = { add: '下に追加', merge: '数量を足す', row: '行を指定' };
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
