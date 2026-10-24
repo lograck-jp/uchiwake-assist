@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.11';
+  var VERSION = '2.0.12';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -766,6 +766,12 @@
       if (atEnd) m2.scrollTop = m2.scrollHeight;
       else if (!hadToast && $('.toast')) m2.scrollTop = scroll + Math.max(0, h0 - m2.clientHeight);
       else m2.scrollTop = scroll;
+      // 入力フォームで次の段が開いたら、その段が上に来るようにする（前の段のスクロール位置のままだと途中から見えていた）
+      var opened = st.ui.anim && m2.querySelector('.ac.anim');
+      if (opened) {
+        var top = opened.getBoundingClientRect().top - m2.getBoundingClientRect().top + m2.scrollTop;
+        m2.scrollTop = top < m2.clientHeight * 0.5 ? 0 : Math.max(0, top - 8);
+      }
     }
     if (focus) {
       var el = document.querySelector('[data-f="' + focus.f + '"]' + (focus.k ? '[data-k="' + CSS.escape(focus.k) + '"]' : ''));
