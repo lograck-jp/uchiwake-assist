@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.4';
+  var VERSION = '2.0.5';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -471,6 +471,8 @@
           if (w.align) c.format.horizontalAlignment = w.align;
           if (w.fmt) c.numberFormat = [[w.fmt]];
         });
+        // 書き込んだシートを表示して（ほかのシートを見ていても）、続けて打つセルを選ぶ
+        ws.activate();
         if (plan.select) ws.getRange(plan.select).select();
         return ctx.sync();
       });
@@ -497,6 +499,7 @@
       return ctx.sync().then(function () {
         u.cells.slice().reverse().forEach(function (c) { ws.getRange(c.addr).formulas = [[c.v == null ? '' : c.v]]; });
         (u.diags || []).forEach(function (d) { ws.getRange(d.addr).format.borders.getItem('DiagonalUp').style = d.style || 'None'; });
+        ws.activate();
         return ctx.sync();
       });
     }).then(function () { st.undo = null; own.allUntil = Date.now() + 900; st.ui.busy = false; return loadModel(); })
