@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.3';
+  var VERSION = '2.0.4';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -222,7 +222,9 @@
   function onSheetChanged(ev) {
     if (Date.now() < own.allUntil) return Promise.resolve();
     if (ev && ev.source && ev.source !== 'Local') return Promise.resolve();
-    // 自分（アドイン）が書いたセルの変更は無視する
+    // 自分（アドイン）が書いたセルの変更は無視する（入力フォーム・計・経費で書いたセル）。
+    // 自動入力で入れた保温厚（F列）は登録しない：前は、厚みを自動で入れた直後に操作者が厚みを
+    // 打ち直すと自分の書き込みと取り違えて無視し、単価が前の厚みのまま残ることがあった
     var ak = String(ev && ev.address || '').replace(/\$/g, '').split('!').pop();
     if (own.addrs[ak] && own.addrs[ak] > Date.now()) { delete own.addrs[ak]; return Promise.resolve(); }
     var type = ev && ev.changeType;
@@ -232,11 +234,7 @@
       var hitsDE = a.c1 <= 5 && a.c2 >= 4, hitsF = a.c1 <= 6 && a.c2 >= 6;
       var rows = a.r2 - a.r1 + 1;
       if ((hitsDE || hitsF) && rows <= 400) {
-        for (var r = a.r1; r <= a.r2; r++) {
-          // 自分が書いた保温厚（F列）の変更は無視する
-          if (!hitsDE && Date.now() < own.until && own.rows[r]) continue;
-          pending.rows[r] = true;
-        }
+        for (var r = a.r1; r <= a.r2; r++) pending.rows[r] = true;
       } else if ((hitsDE || hitsF) && rows > 400) toast('大きな範囲の変更は自動入力しません。単価は「選択行に単価」で入れられます。', 'info');
     }
     schedule();
@@ -277,8 +275,8 @@
     if (!x.spec) return { skip: '上に仕様の行（括弧書き）がありません' };
     var item = o.item, sz = o.sz, fNow = U.isEmpty(o.F) ? '' : U.thickKey(o.F), g = null, five;
     // 入力フォームで書いた BOX（E列に一部の辺だけ出した行）：AA列に残した3辺と面の数で計算する
-    var am = typeof aa === 'string' ? aa.match(/^([^（(]+)[（(]/) : null, ab = am ? UA.parseSize(am[1]) : null;
-    if (ab && ab.box && (String(o.H).trim() === '台' || item === 'box')) { item = 'box'; sz = ab; five = /5面/.test(aa); }
+    var am = typeof aa === 'string' ? aa.match(/^\s*([^（(]+)/) : null, ab = am ? UA.parseSize(am[1].trim()) : null;
+    if (ab && ab.box && (String(o.H).trim() === '台' || item === 'box')) { item = 'box'; sz = ab; five = /5面/.test(aa) ? true : /6面/.test(aa) ? false : undefined; }
     else if (item === 'rect' && sz.wh && String(o.H).trim() === '台') return { skip: 'BOX の寸法が2辺だけです（入力フォームで書いてください）' };
     if (!fNow) g = UA.guessThick(sc, st.master, x, item, sz, r);
     var f = fNow || (g ? g.f : '');
@@ -291,7 +289,7 @@
   function fillRows(rows, mode) {
     if (!st.target || !st.master) return Promise.resolve();
     var target = st.target, rc = refColsOf(), rk = ['y', 'z', 'aa', 'ab'].filter(function (k) { return rc[k]; });
-    var res = { done: [], skip: {}, manual: 0, none: 0 };
+    var res = { done: [], skip: {}, manual: 0, manualRows: [], none: 0 };
     st.ui.busy = true;
     return Excel.run(function (ctx) {
       var ws = ctx.workbook.worksheets.getItem(target);
@@ -306,7 +304,7 @@
         return ctx.sync().then(function () {
           setGrid(rg.values, rg.formulas, last);
           var sc = st.sc, undo = { sheet: target, cells: [], kind: 'auto' }, wrote = {}, anyRef = false;
-          function put(addr, v, prev) { undo.cells.push({ addr: addr, v: prev == null ? '' : prev }); ws.getRange(addr).formulas = [[v]]; own.addrs[addr] = Date.now() + 4000; }
+          function put(addr, v, prev) { undo.cells.push({ addr: addr, v: prev == null ? '' : prev }); ws.getRange(addr).formulas = [[v]]; if (!/^[DEF]\d/.test(addr)) own.addrs[addr] = Date.now() + 4000; }
           var c0 = rk.length ? Math.min.apply(null, ks) : 0;
           function off(i) { return U.colNum(rc[rk[i]]) - c0; }
           function refPrev(r, i) { if (!refRg) return ''; var row = refRg.formulas[r - r1]; return row ? row[off(i)] : ''; }
@@ -329,7 +327,18 @@
               return;
             }
             var gu = guessFor(sc, r, refVal(r, rk.indexOf('aa')));
-            if (gu.skip) { res.skip[gu.skip] = (res.skip[gu.skip] || 0) + 1; return; }
+            if (gu.skip) {
+              res.skip[gu.skip] = (res.skip[gu.skip] || 0) + 1;
+              // 自動で入れた単価が残っていて、いまは単価を決められない行：前の単価を残さず空白にする
+              if (mode === 'auto' && owned && !U.isEmpty(fv[8])) {
+                put('I' + r, '', fv[8]);
+                rk.forEach(function (k, i) { var nv = k === 'y' ? '単価なし：' + gu.skip : ''; if (String(refPrev(r, i)) !== nv) put(rc[k] + r, nv, refPrev(r, i)); });
+                wrote[r] = true;
+                res.done.push({ r: r, size: '', d: '', item: '', f: '', h: '', p: null, kept: false, why: gu.skip, y: '', changed: true });
+              }
+              return;
+            }
+            var n0 = undo.cells.length;
             var iEmpty = U.isEmpty(fv[8]);
             var canI = mode === 'force' || iEmpty || owned;
             if (gu.fNew) put('F' + r, numOrText(gu.fNew), fv[5]);
@@ -339,22 +348,26 @@
               if (!(iEmpty && iv === '') && String(fv[8]) !== String(iv)) put('I' + r, iv, fv[8]);
               rk.forEach(function (k, i) { var nv = gu.pr.ref && gu.pr.ref[k] != null ? gu.pr.ref[k] : ''; if (String(refPrev(r, i)) !== String(nv)) put(rc[k] + r, nv, refPrev(r, i)); });
               anyRef = true;
-            } else res.manual++;
+            } else { res.manual++; res.manualRows.push(r); }
             if (U.isEmpty(fv[9])) put('J' + r, jTpl(r), fv[9]);
             if (gu.pr.p == null) res.none++;
+            // 自動で入れた保温厚・単位の記録（サイズを消したときに一緒に消すため）。操作者が直したら記録を外す
             st.auto.memo = st.auto.memo || {};
-            st.auto.memo[r] = { f: gu.fNew || null, h: gu.h || null };
+            var mm = st.auto.memo[r] || {};
+            if (gu.fNew) mm.f = U.thickKey(gu.fNew); else if (mm.f && U.thickKey(gu.o.F) !== mm.f) mm.f = null;
+            if (gu.h) mm.h = gu.h; else if (mm.h && String(gu.o.H).trim() !== mm.h) mm.h = null;
+            st.auto.memo[r] = mm;
             wrote[r] = true;
-            res.done.push({ r: r, size: UA.sizeLabel(gu.item, gu.sz), d: gu.x.d, item: gu.item, f: gu.f, fNew: !!gu.fNew, fFrom: gu.fFrom, h: gu.h || String(gu.o.H || ''), p: canI ? gu.pr.p : null, kept: !canI, why: gu.pr.why || '', y: gu.pr.ref ? gu.pr.ref.y : '', via: gu.pr.via, formula: gu.pr.formula });
+            res.done.push({ r: r, size: UA.sizeLabel(gu.item, gu.sz), d: gu.x.d, item: gu.item, f: gu.f, fNew: !!gu.fNew, fFrom: gu.fFrom, h: gu.h || String(gu.o.H || ''), p: canI ? gu.pr.p : null, kept: !canI, why: gu.pr.why || '', y: gu.pr.ref ? gu.pr.ref.y : '', via: gu.pr.via, formula: gu.pr.formula, changed: undo.cells.length > n0 });
           });
           if (anyRef) hdr.forEach(function (h) { if (U.isEmpty(h.c.values[0][0])) { undo.cells.push({ addr: rc[h.k] + '1', v: '' }); h.c.values = [[REF_HEAD[h.k]]]; } });
-          own.rows = wrote; own.until = Date.now() + 1800;
           return ctx.sync().then(function () { if (undo.cells.length) st.undo = undo; });
         });
       });
     }).then(function () {
       st.ui.busy = false;
-      var logs = res.done.filter(function (d) { return !d.cleared; });
+      // 自動入力では、実際に書き換えた行だけを記録する（自分の書き込みの通知で動いたときは何も出さない）
+      var logs = res.done.filter(function (d) { return !d.cleared && (mode === 'force' || d.changed); });
       if (logs.length) { st.auto.log = logs.slice(-30).reverse().concat(st.auto.log).slice(0, 40); }
       if (mode === 'force') {
         var t = logs.length ? logs.length + '行に単価を入れました' : '単価を入れる行がありませんでした';
@@ -362,7 +375,11 @@
         var sk = Object.keys(res.skip); if (sk.length) t += '。入れなかった行：' + sk.map(function (k) { return k + ' ' + res.skip[k] + '行'; }).join('、');
         toast(t, logs.length ? (res.none ? 'warn' : 'ok') : 'warn', logs.length > 0);
       } else if (logs.length === 1 && logs[0].p == null && !logs[0].kept) {
-        toast(logs[0].r + '行目：' + (logs[0].why || '協会単価なし'), 'warn', true);
+        toast(logs[0].r + '行目：' + (logs[0].why || '協会単価なし') + '（単価は空白にしました）', 'warn', true);
+      } else if (res.manualRows.length && !logs.some(function (d) { return !d.kept; })) {
+        // 手で入れた単価は変えない。厚み・サイズを変えたときに前の単価が残るので知らせる
+        var mr = res.manualRows, rn = mr.slice(0, 3).join('・') + '行目' + (mr.length > 3 ? 'ほか' + (mr.length - 3) + '行' : '');
+        toast(rn + 'は手で入れた単価なので変えていません。厚み・サイズに合っているか確かめてください（入れ直すときは「選択行に単価」）', 'warn');
       }
       return loadModel();
     }).catch(function (e) {

@@ -828,6 +828,12 @@
     } else cj = findCol(tbl, r.col, f);
     if (cj.j < 0) return { p: null, why: '【' + r.id + '】に' + (r.col ? '「' + r.col + '」' : '') + (f ? f + 'mm' : '') + 'の列がありません' };
     colInfo = cj.c;
+    // 厚みが1つだけの表（見出しに「×25mm」「厚み25mm」）で、別の厚みを聞かれたときは単価なし
+    // （前は「※表は25mm」と付けて同じ単価を入れていたため、厚みを変えても前の単価のままに見えた）
+    if (f && colInfo && colInfo.t == null && rowT == null) {
+      var tF = fixedT(tbl, colInfo);
+      if (tF && String(parseFloat(f)) !== String(parseFloat(tF))) return { p: null, why: '【' + r.id + '】は' + tF + 'mmの表で、' + parseFloat(f) + 'mmの単価がありません' };
+    }
     var v = tbl.rows[ri.i][cj.j];
     if (typeof v !== 'number') return { p: null, why: '【' + r.id + '】の' + (tbl.rows[ri.i][0]) + '・' + tbl.cols[cj.j] + 'は空欄です' };
     var res = { p: v, base: v, tbl: tbl, rowLabel: String(tbl.rows[ri.i][0]), col: colInfo, area: ri.area || null, sqm: !!ri.sqm, rowT: rowT };
@@ -1863,8 +1869,15 @@
       ref.aa = sz.text + '（' + area + '㎡・' + (five ? '5面' : '6面') + '）';
     } else if (q.item === 'rect' && sz.wh) ref.aa = '（㎡単価）' + sz.text;
     return { p: p, formula: formula, ref: ref, via: 'sk', approx: r.approx, id: r.id };
-    function noPrice(why) { return { p: null, why: why, ref: { y: '単価なし：' + why, z: '', aa: sizeLabel(q.item, sz), ab: q.f ? q.f + 'mm' : '' } }; }
+    function noPrice(why) { return { p: null, why: why, ref: { y: '単価なし：' + why, z: '', aa: boxRefAA(q, sz) || sizeLabel(q.item, sz), ab: q.f ? q.f + 'mm' : '' } }; }
   };
+  // BOX の参照サイズ（AA列）：3辺・面積・面の数。単価が無いときも同じ書き方にして、
+  // 厚みを直したときに3辺から入れ直せるようにする（E列に一部の辺だけ出していても）
+  function boxRefAA(q, sz) {
+    if (q.item !== 'box' || !sz || !sz.box) return null;
+    var five = q.five != null ? !!q.five : UA.isFiveSided(q.d || '');
+    return sz.text + '（' + UA.boxArea(sz.box, five) + '㎡・' + (five ? '5面' : '6面') + '）';
+  }
   function ruleLine(sk, m, rules, q, help, depth, rule) {
     var baseItem = rule.base === 'kind' ? q.item : (q.item === 'round' || q.item === 'rect' || q.item === 'box' ? 'round' : 'pipe');
     var baseD = rule.base === 'kind' ? rule.baseKind : '';
@@ -1878,7 +1891,7 @@
       var bp = UA.priceLine(sk, m, rules, bq, help, depth + 1);
       if (bp.p == null) {
         var why = '計算ルール「' + rule.name + '」の基準（' + baseName + ' ' + sizeLabel(baseItem, q.sz) + (q.f ? ' ' + q.f + 'mm' : '') + '）の単価がありません';
-        return { p: null, why: why, ref: { y: '単価なし：' + why + (bp.why ? '（' + bp.why + '）' : ''), z: '', aa: sizeLabel(q.item, q.sz), ab: q.f ? q.f + 'mm' : '' } };
+        return { p: null, why: why, ref: { y: '単価なし：' + why + (bp.why ? '（' + bp.why + '）' : ''), z: '', aa: boxRefAA(q, q.sz) || sizeLabel(q.item, q.sz), ab: q.f ? q.f + 'mm' : '' } };
       }
       expr = bp.formula ? '(' + bp.formula.slice(1) + ')' : String(bp.p); val = bp.p;
       from = baseName + '＝' + (bp.ref && bp.ref.y ? bp.ref.y.replace(/^単価なし：/, '') : '') + '（' + yen(bp.p) + '円）';
