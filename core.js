@@ -2189,6 +2189,47 @@
     return res;
   };
   // 経費の金額の見込み（画面の表示用）
+  /* ---------- エルボ 1式（選んでいる行の塊） ----------
+     塊（仕様の行から下の明細）の最後の行の下に E=エルボ・G=1・H=式・K=率・L=ROUNDUP(SUM(単位 m の明細の J列)*K,-1)・I=L。
+     塊にエルボ（E=エルボ・H=式）が既にあれば、その行の式を書き直す（行は増やさない）。
+     すぐ下が計の行なら、計の範囲に入るように塊の中に1行入れる。それ以外は「エルボ・空き行」の2行ぶん空ける */
+  UA.elbowPlan = function (sc, g, R, opt) {
+    opt = opt || {};
+    var rate = num(opt.rate) || 0.35, label = opt.label || 'エルボ', res = { ok: false };
+    function v(r, c) { var row = g.v[r - 1]; var x = row ? row[c] : ''; return x == null ? '' : x; }
+    function blankRow(r) { for (var c = 0; c <= 11; c++) if (c !== C.J && !isEmpty(v(r, c))) return false; return true; }
+    if (!sc || !R) { res.message = '内訳で行を選んでください'; return res; }
+    var o = sc.rows[R], B;
+    if (o && !o.blank && o.blockId && /line|other|dhead|spec/.test(o.kind)) B = o.blockId;
+    else B = UA.ctxAt(sc, R).blockId;
+    var rows = sc.rows.filter(function (x) { return x && x.blockId === B && !x.after && x.r >= sc.startRow; });
+    if (!B || !rows.some(function (x) { return x.kind === 'spec' || x.kind === 'line'; })) { res.message = '選んでいる行の塊（仕様の行の下の明細）が見つかりません'; return res; }
+    var lines = rows.filter(function (x) { return x.kind === 'line' && nk(String(x.H)).replace(/\s/g, '') === 'm'; });
+    if (!lines.length) { res.message = 'この塊に単位「m」の明細がありません'; return res; }
+    var elb = rows.filter(function (x) { return x.kind === 'other' && /エルボ/.test(String(x.E)) && trimAll(x.H) === '式'; })[0];
+    var last = 0; rows.forEach(function (x) { if (/line|other|dhead|spec/.test(x.kind)) last = Math.max(last, x.r); });
+    var t, ins = null;
+    if (elb) t = elb.r;
+    else {
+      t = last + 1;
+      var nx = 0; for (var r = last + 1; r <= g.v.length; r++) if (!blankRow(r)) { nx = r; break; }
+      var nxo = nx ? sc.rows[nx] : null;
+      if (nxo && nxo.kind === 'total') ins = { at: t, n: 1 };
+      else { var b = 0; while (b < 2 && blankRow(t + b)) b++; if (b < 2) ins = { at: t + b, n: 2 - b }; }
+    }
+    var refs = lines.map(function (x) { return 'J' + x.r; });
+    var formula = '=ROUNDUP(SUM(' + refs.join(',') + ')*K' + t + ',-1)';
+    var writes = [
+      { r: t, col: 'E', v: label, align: 'Right' }, { r: t, col: 'G', v: 1 }, { r: t, col: 'H', v: '式' },
+      { r: t, col: 'I', v: '=L' + t }, { r: t, col: 'L', v: formula }
+    ];
+    if (!elb || isEmpty(v(t, 10))) writes.push({ r: t, col: 'K', v: rate });
+    var sum = 0; lines.forEach(function (x) { if (typeof x.J === 'number') sum += x.J; });
+    var kNow = elb && num(v(t, 10)) > 0 ? num(v(t, 10)) : rate;
+    res.ok = true; res.at = t; res.ins = ins; res.update = !!elb; res.refs = refs; res.formula = formula; res.writes = writes;
+    res.select = 'E' + (t + 1); res.est = Math.ceil(sum * kNow / 10 - 1e-9) * 10; res.rate = kNow; res.lines = lines.length;
+    return res;
+  };
   UA.expenseEstimate = function (k, c, base, labor, zaiko) {
     if (k === 'welfare') return zaiko ? roundVal(labor * num(c.l), 'up10') : roundVal(base * num(c.k) * num(c.l), 'up10');
     var d = -num(c.l), p = Math.pow(10, d > 0 ? d : 0);
