@@ -304,7 +304,7 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .ftbtn:hover:not(:disabled) { background: var(--wool-soft); }
 
 /* ---- お知らせ ---- */
-.toast { position: absolute; left: 10px; right: 10px; bottom: 62px; z-index: 30; display: flex; align-items: center; gap: 8px; padding: 9px 6px 9px 12px; border-radius: 9px; background: #2A3038; color: var(--text); box-shadow: 0 12px 30px rgba(0, 0, 0, .45); font-size: 12px; line-height: 1.55; }
+.toast { position: relative; flex: none; margin: 0 10px 8px; z-index: 5; display: flex; align-items: center; gap: 8px; padding: 9px 6px 9px 12px; border-radius: 9px; background: #2A3038; color: var(--text); box-shadow: 0 -6px 18px rgba(0, 0, 0, .28); font-size: 12px; line-height: 1.55; }
 .toast span { flex: 1; }
 .toast.ok { background: #1D2E25; }
 .toast.warn { background: var(--warn-bg); }
@@ -333,3 +333,11 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .tkx.on { border-color: var(--wool); color: var(--wool); }
 .bres b { color: var(--text); font-family: var(--fig); }
 .dr.box { grid-template-columns: minmax(0, 1fr) 10px minmax(0, 1fr) 10px minmax(0, 1fr) 36px 14px 24px; }
+
+/* 出精値引き：決定金額（1億円まで＝11桁ぶんの幅、3桁区切り） */
+.disc { display: flex; align-items: center; gap: 8px; }
+.disc-l { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.disc-in { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.disc-in .in { width: 118px; font-size: 14px; letter-spacing: .02em; }
+.disc-in em { font-style: normal; color: var(--muted); }
+.disc .ghost { flex: none; min-width: 72px; margin-left: auto; }

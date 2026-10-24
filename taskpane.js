@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.2';
+  var VERSION = '2.0.3';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -719,8 +719,17 @@
     var ae = document.activeElement, focus = null;
     if (ae && ae.dataset && ae.dataset.f) focus = { f: ae.dataset.f, k: ae.dataset.k || '', s: ae.selectionStart, e: ae.selectionEnd };
     var main = $('#main'), scroll = main ? main.scrollTop : 0;
+    var atEnd = main ? main.scrollTop + main.clientHeight >= main.scrollHeight - 4 : false;
+    var h0 = main ? main.clientHeight : 0, hadToast = !!$('.toast');
     app.innerHTML = view();
-    var m2 = $('#main'); if (m2) m2.scrollTop = scroll;
+    var m2 = $('#main');
+    if (m2) {
+      // お知らせは一覧に重ねず、一覧の下に出す。出たぶん一覧が狭くなるので、
+      // 下の端に見えていた入力欄などがそのまま見えるように、狭くなったぶんだけ送る
+      if (atEnd) m2.scrollTop = m2.scrollHeight;
+      else if (!hadToast && $('.toast')) m2.scrollTop = scroll + Math.max(0, h0 - m2.clientHeight);
+      else m2.scrollTop = scroll;
+    }
     if (focus) {
       var el = document.querySelector('[data-f="' + focus.f + '"]' + (focus.k ? '[data-k="' + CSS.escape(focus.k) + '"]' : ''));
       if (el) { el.focus(); try { if (focus.s != null) el.setSelectionRange(focus.s, focus.e); } catch (e) { /* noop */ } }
@@ -744,8 +753,8 @@
     else if (st.tab === 'total') h.push(totalView());
     else h.push(rulesView());
     h.push('</div>');
-    h.push(footView());
     h.push(toastView());
+    h.push(footView());
     return h.join('');
   }
   function statusView() {
@@ -1016,11 +1025,19 @@
     h += '<div class="hint">ボタンにマウスを置くと、入れる式が表示されます。押したあとは「元に戻す」で取り消せます</div></section>';
     h += expView();
     var dp = st.grid && R ? UA.totalPlan(st.grid, R, 'discount', { amount: st.ui.discount }) : null;
-    h += '<section class="card"><div class="card-h"><b>出精値引き</b><small>決定金額にそろえる</small></div><div class="row"><input class="in num" data-f="discount" value="' + esc(st.ui.discount) + '" placeholder="決定金額（円）" inputmode="numeric" aria-label="決定金額">' +
+    var dHint = dp ? (dp.ok ? dp.at + '行目に出精値引、' + dp.totalRow + '行目に総合計（合計＝J' + dp.from + '）' : dp.message) : '「合計」の行のすぐ下を選んでください';
+    if (dp && dp.ok) {
+      var gv = (st.grid.v[dp.from - 1] || [])[9];
+      if (typeof gv === 'number') dHint += gv >= dp.amount ? '。値引き ¥' + U.yen(gv - dp.amount) + '（合計 ¥' + U.yen(gv) + '）' : '。決定金額が合計（¥' + U.yen(gv) + '）より大きくなっています';
+    }
+    h += '<section class="card"><div class="card-h"><b>出精値引き</b><small>決定金額にそろえる</small></div><div class="disc"><span class="disc-l">決定金額</span>' +
+      '<span class="disc-in"><input class="in num" data-f="discount" value="' + esc(commaDigits(st.ui.discount)) + '" placeholder="0" inputmode="numeric" maxlength="11" autocomplete="off" aria-label="決定金額（円）"><em>円</em></span>' +
       '<button type="button" class="ghost acc" data-act="discount"' + (dp && dp.ok && !st.ui.busy ? '' : ' disabled') + '>入れる</button></div>' +
-      '<div class="hint">' + esc(dp ? (dp.ok ? dp.at + '行目に出精値引、' + dp.totalRow + '行目に総合計（合計＝J' + dp.from + '）' : dp.message) : '「合計」の行のすぐ下を選んでください') + '</div></section>';
+      '<div class="hint">' + esc(dHint) + '</div></section>';
     return h;
   }
+  function commaDigits(d) { d = String(d == null ? '' : d).replace(/[^0-9]/g, ''); return d.replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
+  function toHalfDigits(t) { return String(t == null ? '' : t).replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); }).replace(/[，、]/g, ','); }
   function rowBlank(r) { var row = st.grid.v[r - 1]; if (!row) return true; for (var c = 0; c < 9; c++) if (!U.isEmpty(row[c])) return false; return true; }
 
   /* ----- 単価ルールタブ ----- */
@@ -1317,7 +1334,20 @@
     if (f === 'specNew') { st.ui.newSpec = v; if (!silent) render(); return; }
     if (f === 'specEditText') { if (st.ui.specEdit) st.ui.specEdit.spec = v; return; }
     if (f === 'specNewPlace' || f === 'specNewCat' || f === 'specEditPlace' || f === 'specEditCat' || f === 're.round') return;
-    if (f === 'discount') st.ui.discount = v;
+    if (f === 'discount') {
+      if (silent) return; // 日本語入力の変換中は触らない（確定したときに整える）
+      var hv = toHalfDigits(v), caret = el.selectionStart == null ? hv.length : el.selectionStart;
+      var before = toHalfDigits(v.slice(0, caret)).replace(/[^0-9]/g, '').length;
+      var dg = hv.replace(/[^0-9]/g, '').replace(/^0+(?=[0-9])/, '').slice(0, 9);
+      if (before > dg.length) before = dg.length;
+      st.ui.discount = dg;
+      var nv = commaDigits(dg);
+      if (el.value !== nv) {
+        el.value = nv;
+        var pos = 0, seen = 0; while (pos < nv.length && seen < before) { if (nv.charAt(pos) !== ',') seen++; pos++; }
+        try { el.setSelectionRange(pos, pos); } catch (e) { /* noop */ }
+      }
+    }
     else if (f === 'rRq') w.rect.rq = v;
     else if (f === 'rFx') w.rect.fx = v;
     else if (f === 'bFx') w.box.fx = v;
