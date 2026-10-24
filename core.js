@@ -1575,6 +1575,9 @@
   }
   UA.famOfCtx = famOfCtx;
   var PIPE_D = /^(SUS|SGP|VP|VU|HIVP|HTVP|鋼管|白管|黒管|銅管|CU|PE|ポリ管|架橋|ライニング|LP|DVLP|SGP-VA|SGP-VB)/i;
+  // 弁・計器・継手など「ヶ」で数えるものの言葉／配管の系統の言葉（D列に系統名を書いた配管の行を見分ける）
+  var VALVE_WORD = /弁|バルブ|GV|BV|CV|BAV|ストレーナ|スト$|Yスト|ヘッダー|メーター|メータ|計$|ポンプ|FJ|FLG|フランジ|サイレンサー|ダンパー|キャンバス|トラップ|鉛|BOX|チャンバー/i;
+  var SYS_WORD = /^(冷暖房|冷温水|冷水|温水|給水|給湯|返湯|排水|汚水|雑排水|通気|蒸気|還水|ドレン|冷媒|消火|屋内消火|スプリンクラー|油|ガス|膨張|補給水|冷却水)/;
   // 明細の品目を決める（D列の種別・E列のサイズ・文脈から）
   UA.guessItem = function (m, x) {
     var sz = x.sz; if (!sz) return null;
@@ -1586,7 +1589,15 @@
     if (sz.ser === 'Su' || sz.ser === 'VP') return 'pipe';
     if (d) {
       if (PIPE_D.test(d)) return 'pipe';
+      if (inSubs('valve')) return 'valve';
       if (inSubs('flange') || /^(FLG|フランジ)/i.test(d)) return 'flange';
+      // D列に系統の名前（蒸気管・給水管・冷暖房など）を書いた配管の行。撤去の見積でよく使う
+      // （前は弁類とみなして単位が「ヶ」、単価は「対応する表がありません」になっていた）
+      if (!/ダクト/.test(d) && !PIECE_D.test(d) && !VALVE_WORD.test(d)) {
+        var sysD = m && m.systems ? m.systems.filter(function (y) { return y.name && nk(y.name) === d; })[0] : null;
+        if (sysD) return sysD.fam === 'duct' ? (sz.ser === 'A' ? 'pipe' : 'round') : 'pipe';
+        if (/管$|管[\s　(（・]|配管/.test(d) || SYS_WORD.test(d)) return 'pipe';
+      }
       if (duct || /ダクト|フレックス/.test(d)) {
         if (sz.ser === 'A') return inSubs('valve') ? 'valve' : 'pipe';
         return 'round';
@@ -1975,8 +1986,9 @@
       // 経費・見積条件より下では使わない
       for (var ib = R; ib >= TOP; ib--) { var ab = txt(ib, C.A); if (ab && isBoundA(ab)) { res.message = '「' + ab.trim().slice(0, 8) + '」より下では使えません'; return res; } if (headKey(v(ib, C.I)) === '工事費' && kind !== 'grand') { res.message = '工事費計より下では使えません'; return res; } }
     }
-    // 書き込む位置：選んだ行が空き行ならそこから、明細などが入っていればその下から
-    var need = kind === 'discount' ? 3 : 2;
+    // 書き込む位置：選んだ行が空き行ならそこから、明細などが入っていればその下から。
+    // 計の行の下に A〜I列が空の行を1行残す（足りなければ行を入れる。J列の金額式はあってよい）
+    var need = (kind === 'discount' ? 3 : 2) + 1;
     var P = blank(R) ? R : R + 1, b = 0;
     while (b < need && P + b <= g.v.length + need && blank(P + b)) b++;
     res.at = P; res.k = need; res.ins = need - b; res.insAt = P + b;

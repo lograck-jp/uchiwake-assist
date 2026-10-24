@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.5';
+  var VERSION = '2.0.6';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -648,7 +648,7 @@
     var p = totalPlanOf(def);
     if (!p || !p.ok) { toast(p ? p.message : '準備ができていません', 'warn'); render(); return; }
     applyPlan({ ins: p.ins ? { at: p.insAt, n: p.ins } : null, writes: totalWrites(p), select: 'A' + p.select },
-      p.totalRow + '行目に「' + p.label + '」' + p.formula + ' を入れました' + (p.warn ? '（' + p.warn + '）' : '')).then(render);
+      (p.ins ? p.ins + '行挿入して、' : '') + p.totalRow + '行目に「' + p.label + '」' + p.formula + ' を入れました' + (p.warn ? '（' + p.warn + '）' : '')).then(render);
   }
   function suggestTotal() {
     var R = targetRow();
