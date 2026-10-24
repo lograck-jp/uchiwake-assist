@@ -10,9 +10,9 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.0';
+  var VERSION = '2.0.1';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
-    K_UI = 'uchiwake-assist.ui.v2', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
+    K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
   var TAB = { input: '入力', total: '計・経費', rules: '単価ルール' };
 
@@ -30,9 +30,9 @@
     undo: null, api19: false, api17: false, autoOpen: false
   };
   function freshWiz() {
-    return { open: 'item', item: '', place: '', spec: '', cont: false, d: '', done: null,
-      rect: { sub: '', t16: false, f: '', dims: [{ w: '', h: '', l: '' }], rq: '' },
-      box: { name: '', five: null, f: '', boxes: [{ w: '', d: '', h: '', n: '1' }] } };
+    return { open: 'item', item: '', place: '', spec: '', cont: false, d: '', done: null, insN: '',
+      rect: { sub: '', t16: false, f: '', fx: '', rq: '' },
+      box: { name: '', five: null, f: '', fx: '', show: { w: true, h: true, l: true }, sym: false, boxes: [{ w: '', h: '', l: '', n: '1' }] } };
   }
 
   /* ---------- 保存（このパソコンの中） ---------- */
@@ -55,7 +55,8 @@
     } catch (e) { /* noop */ }
     st.autoOpen = docGet('Office.AutoShowTaskpaneWithDocument') === true;
     var raw = load(K_MASTER); if (raw && raw.master) setMaster(raw.master, raw.info, false);
-    var sl = load(K_SPECS); if (sl && sl.add) st.specLocal = { add: sl.add || [], hide: sl.hide || {}, pin: sl.pin || {} };
+    var sl = load(K_SPECS); if (sl && sl.add) st.specLocal = { add: sl.add || [], hide: sl.hide || {}, pin: sl.pin || {}, order: sl.order || {} };
+    var bu = load(K_BOX); if (bu && bu.show) { st.wiz.box.show = bu.show; st.wiz.box.sym = !!bu.sym; }
     st.siteType = docGet('uchiwake.siteType') || '';
     var skRaw = load(K_SK); if (skRaw && skRaw.sk && skRaw.sk.tables) { st.sk = skRaw.sk; st.skInfo = skRaw.info; }
     var ui = load(K_UI); if (ui) { if (ui.auto === false) st.auto.on = false; if (ui.full === false) st.ui.full = false; if (TAB[ui.tab]) st.tab = ui.tab; }
@@ -269,16 +270,20 @@
   }
 
   /* ---------- 自動入力・選択行に単価 ---------- */
-  function guessFor(sc, r) {
+  function guessFor(sc, r, aa) {
     var o = sc.rows[r];
     if (!o || o.kind !== 'line') return { skip: '明細の行ではありません' };
     var x = UA.ctxAt(sc, r, o.D);
     if (!x.spec) return { skip: '上に仕様の行（括弧書き）がありません' };
-    var item = o.item, sz = o.sz, fNow = U.isEmpty(o.F) ? '' : U.thickKey(o.F), g = null;
+    var item = o.item, sz = o.sz, fNow = U.isEmpty(o.F) ? '' : U.thickKey(o.F), g = null, five;
+    // 入力フォームで書いた BOX（E列に一部の辺だけ出した行）：AA列に残した3辺と面の数で計算する
+    var am = typeof aa === 'string' ? aa.match(/^([^（(]+)[（(]/) : null, ab = am ? UA.parseSize(am[1]) : null;
+    if (ab && ab.box && (String(o.H).trim() === '台' || item === 'box')) { item = 'box'; sz = ab; five = /5面/.test(aa); }
+    else if (item === 'rect' && sz.wh && String(o.H).trim() === '台') return { skip: 'BOX の寸法が2辺だけです（入力フォームで書いてください）' };
     if (!fNow) g = UA.guessThick(sc, st.master, x, item, sz, r);
     var f = fNow || (g ? g.f : '');
     var h = U.isEmpty(o.H) ? UA.guessUnit(sc, st.master, x, item, r) : null;
-    var pr = UA.priceLine(st.sk, st.master, rules(), { item: item, d: x.d, place: x.place, spec: x.spec, sz: sz, f: f },
+    var pr = UA.priceLine(st.sk, st.master, rules(), { item: item, d: x.d, five: five, place: x.place, spec: x.spec, sz: sz, f: f },
       { findBase: function (b) { return UA.findBaseLine(sc, x, r, b); } });
     return { o: o, x: x, item: item, sz: sz, f: f, fNew: fNow ? null : (g && g.f ? g.f : null), fFrom: g ? g.from : '', h: h, pr: pr };
   }
@@ -323,7 +328,7 @@
               }
               return;
             }
-            var gu = guessFor(sc, r);
+            var gu = guessFor(sc, r, refVal(r, rk.indexOf('aa')));
             if (gu.skip) { res.skip[gu.skip] = (res.skip[gu.skip] || 0) + 1; return; }
             var iEmpty = U.isEmpty(fv[8]);
             var canI = mode === 'force' || iEmpty || owned;
@@ -382,6 +387,19 @@
     });
   }
   // plan = { ins:{at,n}|null, writes:[{r,col,v,diag,align,fmt}], select:'E27', label }
+  var FMT_SHEET = '内訳(FMT)', FMT_ROW = 5, fmtExists = null;
+  // 内訳(FMT) が無いブックのとき：このシートの下のほうの、何も入っていない行（初めの書式のまま）
+  function blankTemplateRow() {
+    if (!st.grid) return null;
+    for (var r = st.grid.v.length; r > startRowOf(); r--) { var row = st.grid.v[r - 1]; if (row && row.slice(0, 9).every(U.isEmpty)) return r; }
+    return null;
+  }
+  function fmtSrc(fr, ins) {
+    if (fmtExists) return "'" + FMT_SHEET + "'!A" + FMT_ROW + ':J' + FMT_ROW;
+    if (!fr) return null;
+    var r = fr >= ins.at ? fr + ins.n : fr;   // 挿入でずれた位置
+    return 'A' + r + ':J' + r;
+  }
   function applyPlan(plan, doneText) {
     if (st.ui.busy) return Promise.resolve(false);
     if (!st.headerOK) { toast('書き込み先が内訳シートではないようです（1行目に「保温厚」の見出しがありません）', 'err'); render(); return Promise.resolve(false); }
@@ -399,13 +417,36 @@
         var b = w.diag ? c.format.borders.getItem('DiagonalUp') : null; if (b) b.load('style');
         return { w: w, o: o, c: c, b: b };
       });
+      // 挿入した行の書式の元：内訳(FMT)（ひな型の初めの書式）。無ければこのシートの下の空き行
+      var fmt = ins ? ctx.workbook.worksheets.getItemOrNullObject(FMT_SHEET) : null;
+      if (fmt) fmt.load('name');
       return ctx.sync().then(function () {
+        var srcRg = null;
+        if (fmt) fmtExists = !fmt.isNullObject;
+        if (ins && st.api19) {
+          if (fmtExists) srcRg = fmt.getRange('A' + FMT_ROW + ':J' + FMT_ROW);
+          else { var fr = blankTemplateRow(); if (fr) srcRg = ws.getRange('A' + fr + ':J' + fr); }
+          if (srcRg) srcRg.format.load('rowHeight');
+        }
+        return ctx.sync().then(function () { return srcRg ? srcRg.format.rowHeight : null; });
+      }).then(function (rowH) {
+        var src = ins && st.api19 ? fmtSrc(blankTemplateRow(), ins) : null;
         before.forEach(function (x) {
           if (!x) return;
           undo.cells.push({ addr: x.w.col + x.o, v: x.c.formulas[0][0] });
           if (x.b) undo.diags.push({ addr: x.w.col + x.o, style: x.b.style });
         });
-        if (ins) { own.struct = until; ws.getRange(ins.at + ':' + (ins.at + ins.n - 1)).insert('Down'); }
+        if (ins) {
+          own.struct = until; ws.getRange(ins.at + ':' + (ins.at + ins.n - 1)).insert('Down');
+          // 挿入した行：A〜J列を内訳の初めの書式にし、J列に金額式を入れる（このあと書く行は上書き）
+          for (var ir = ins.at; ir < ins.at + ins.n; ir++) {
+            var dst = ws.getRange('A' + ir + ':J' + ir);
+            if (src) dst.copyFrom(src, 'Formats');
+            ws.getRange('J' + ir).formulas = [[jTpl(ir)]];
+            own.addrs['J' + ir] = until;
+          }
+          if (rowH) ws.getRange(ins.at + ':' + (ins.at + ins.n - 1)).format.rowHeight = rowH;
+        }
         plan.writes.forEach(function (w) {
           var c = ws.getRange(w.col + w.r);
           c.formulas = [[w.v == null ? '' : w.v]];
@@ -474,38 +515,50 @@
   function wizPlan() {
     var w = st.wiz, R = targetRow();
     if (!st.sc || !R || !w.spec) return null;
-    return UA.specWritePlan(st.sc, R, { place: w.place, spec: w.spec, lines: extraLines().lines });
+    return UA.specWritePlan(st.sc, R, { place: w.place, spec: w.spec, lines: extraLines().lines, insN: w.insN });
   }
-  function rectArea() { var t = 0; st.wiz.rect.dims.forEach(function (d) { var w = U.num(d.w), h = U.num(d.h), l = U.num(d.l); if (w > 0 && h > 0 && l > 0) t += 2 * (w + h) / 1000 * l; }); return Math.ceil(t * 10 - 1e-9) / 10; }
-  // 角ダクト・BOX：書き込む明細（1行ずつ）
+  // 角ダクト・BOX の保温厚：ボタン（25・50）か、操作者が入れた厚み
+  function ductThick(o, guess) { return U.thickKey(o.fx) || o.f || guess || '25'; }
+  // BOX の寸法の書き方（E列）：出す辺だけ、記号付き／なし
+  function boxText(b, bx) {
+    var parts = [];
+    [['w', 'W'], ['h', 'H'], ['l', 'L']].forEach(function (k) { if (bx.show[k[0]] && U.num(b[k[0]]) > 0) parts.push((bx.sym ? k[1] : '') + U.num(b[k[0]])); });
+    return parts.join('×');
+  }
+  // 角ダクト・BOX：書き込む明細
   function extraLines() {
-    var w = st.wiz, out = { lines: [], notes: [] };
+    var w = st.wiz, out = { lines: [], head: '' };
     if (!st.master || !w.spec) return out;
-    var R = targetRow(), P = R && st.sc && st.sc.rows[R] && !st.sc.rows[R].blank ? R + 1 : R;
-    var x = st.sc && P ? UA.ctxAt(st.sc, P) : { blockId: -1, sysId: 0 };
+    var R = targetRow(), x = st.sc && R ? UA.ctxAt(st.sc, R) : { blockId: -1, sysId: 0 };
     var cont = x.spec === U.normSpec(w.spec) && U.trimAll(x.place) === U.trimAll(w.place);
     var xx = { spec: U.normSpec(w.spec), place: w.place, blockId: cont ? x.blockId : -1, sysId: x.sysId, d: '' };
-    function price(item, d, sz, f) { return UA.priceLine(st.sk, st.master, rules(), { item: item, d: d, place: w.place, spec: U.normSpec(w.spec), sz: sz, f: f }, null); }
     if (w.item === 'rect') {
-      var rt = w.rect, g = rt.rq !== '' ? U.num(rt.rq) : rectArea();
+      var rt = w.rect, g = U.num(rt.rq);
       var d = rt.sub ? rt.sub + (rt.t16 ? '(1.6t)' : '') : '';
       xx.d = d;
-      var ft = rt.f || (st.sc ? UA.guessThick(st.sc, st.master, xx, 'rect', { rect: true, text: '矩形' }, -1).f : '25') || '25';
-      var pr = price('rect', d, { rect: true, text: '矩形' }, ft);
+      var ft = ductThick(rt, st.sc ? UA.guessThick(st.sc, st.master, xx, 'rect', { rect: true, text: '矩形' }, -1).f : '');
+      var pr = UA.priceLine(st.sk, st.master, rules(), { item: 'rect', d: d, place: w.place, spec: xx.spec, sz: { rect: true, text: '矩形' }, f: ft }, null);
       out.f = ft; out.pr = pr; out.g = g; out.d = d;
-      if (g > 0) out.lines.push({ d: d, e: '矩形', f: ft, g: g, h: '㎡', pr: pr });
+      out.lines.push({ d: d, e: '矩形', f: ft, g: g > 0 ? g : '', h: '㎡', pr: pr });
     } else if (w.item === 'box') {
-      var bx = w.box, name = bx.name || '', five = bx.five == null ? UA.isFiveSided(name) : bx.five;
+      var bx = w.box, name = String(bx.name || '').trim(), five = bx.five == null ? UA.isFiveSided(name) : bx.five;
       xx.d = name;
-      var fb = bx.f || (st.sc ? UA.guessThick(st.sc, st.master, xx, 'box', { box: { w: 1, d: 1, h: 1 }, text: '' }, -1).f : '25') || '25';
+      var fb = ductThick(bx, st.sc ? UA.guessThick(st.sc, st.master, xx, 'box', { box: { w: 1, d: 1, h: 1 }, text: '' }, -1).f : '');
       out.f = fb; out.five = five;
-      bx.boxes.forEach(function (b, i) {
-        var ww = U.num(b.w), dd = U.num(b.d), hh = U.num(b.h), n = U.num(b.n) || 1;
-        if (!(ww > 0 && dd > 0 && hh > 0)) return;
-        var sz = { box: { w: ww, d: dd, h: hh }, text: ww + '×' + dd + '×' + hh };
-        var p = UA.priceLine(st.sk, st.master, rules(), { item: 'box', d: name, five: five, place: w.place, spec: U.normSpec(w.spec), sz: sz, f: fb }, null);
-        out.lines.push({ d: i === 0 || !out.lines.length ? name : '', e: sz.text, f: fb, g: n, h: '台', pr: p, area: UA.boxArea(sz.box, five) });
+      // D列の名前は1行目に単独で書き、その下の行の E列に寸法（上の行と同じ名前なら書かない）
+      out.head = name && !(cont && x.prevKind && x.prevKind !== 'blank' && U.trimAll(x.d) === U.trimAll(name)) ? name : '';
+      if (out.head) out.lines.push({ head: true, d: name });
+      bx.boxes.forEach(function (b) {
+        var ww = U.num(b.w), hh = U.num(b.h), ll = U.num(b.l), n = U.num(b.n) || 1;
+        if (!(ww > 0 && hh > 0 && ll > 0)) return;
+        var sz = { box: { w: ww, d: ll, h: hh }, text: 'W' + ww + '×H' + hh + '×L' + ll };
+        var p = UA.priceLine(st.sk, st.master, rules(), { item: 'box', d: name, five: five, place: w.place, spec: xx.spec, sz: sz, f: fb }, null);
+        var area = UA.boxArea(sz.box, five);
+        // AA列には3辺と面積を残す（E列に一部の辺しか出さなくても、単価を入れ直せるように）
+        if (p.ref) p.ref = Object.assign({}, p.ref, { aa: sz.text + '（' + area + '㎡・' + (five ? '5面' : '6面') + '）' });
+        out.lines.push({ d: '', e: boxText(b, bx) || sz.text, f: fb, g: n, h: '台', pr: p, area: area });
       });
+      if (out.lines.length === (out.head ? 1 : 0)) out.lines = [];
     }
     return out;
   }
@@ -513,7 +566,7 @@
     var w = st.wiz, p = wizPlan(), ex = extraLines();
     if (!p) { toast(!targetRow() ? '内訳シートで書き込みたい行を選んでください' : '仕様を選んでください', 'warn'); render(); return; }
     if (!p.ok) { toast(p.message, 'warn'); render(); return; }
-    if ((w.item === 'rect' || w.item === 'box') && !ex.lines.length) { toast(w.item === 'rect' ? '寸法か㎡を入れてください' : 'BOX の寸法（W・D・H）を入れてください', 'warn'); render(); return; }
+    if (w.item === 'box' && !ex.lines.length) { toast('BOX の寸法（W・H・L）を入れてください', 'warn'); render(); return; }
     var writes = [], rc = refColsOf(), rk = ['y', 'z', 'aa', 'ab'].filter(function (k) { return rc[k]; }), r = p.P;
     if (p.writeSpec) {
       writes.push({ r: r, col: 'C', v: p.writePlace ? '(' + w.place + ')' : '' });
@@ -521,9 +574,11 @@
       writes.push({ r: r, col: 'J', v: '' });
       r++;
     }
+    var first = r;
     if (ex.lines.length) {
       var prevD = p.ctx && !p.writeSpec ? p.ctx.d : '';
-      ex.lines.forEach(function (l, i) {
+      ex.lines.forEach(function (l) {
+        if (l.head) { writes.push({ r: r, col: 'D', v: l.d, align: 'Center' }, { r: r, col: 'J', v: jTpl(r) }); prevD = l.d; r++; return; }
         var dShow = l.d && l.d !== prevD ? l.d : '';
         if (l.d) prevD = l.d;
         writes.push({ r: r, col: 'D', v: dShow, align: 'Center' }, { r: r, col: 'E', v: l.e, align: 'Right' }, { r: r, col: 'F', v: numOrText(l.f) }, { r: r, col: 'G', v: l.g }, { r: r, col: 'H', v: l.h });
@@ -535,14 +590,16 @@
       if (w.d) writes.push({ r: r, col: 'D', v: w.d, align: 'Center' });
       writes.push({ r: r, col: 'J', v: jTpl(r) });
     }
-    var sel = ex.lines.length ? 'D' + r : 'E' + p.inputRow;
-    var t = p.writeSpec ? p.P + '行目に仕様の行を書きました。' : '';
-    t += ex.lines.length ? (p.inputRow) + (ex.lines.length > 1 ? '〜' + (p.inputRow + ex.lines.length - 1) : '') + '行目に明細を書きました' : 'E' + p.inputRow + ' からサイズを打つと、保温厚・単位・単価が自動で入ります';
+    // 角ダクトで数量（㎡）が空なら G列を選ぶ。BOX は次の行
+    var sel = w.item === 'rect' && !(U.num(w.rect.rq) > 0) ? 'G' + first : ex.lines.length ? 'D' + r : 'E' + p.inputRow;
+    var t = (p.ins ? p.ins + '行挿入して、' : '') + (p.writeSpec ? p.P + '行目に仕様の行を書きました。' : '');
+    t += ex.lines.length ? first + (r - 1 > first ? '〜' + (r - 1) : '') + '行目に明細を書きました' + (w.item === 'rect' && !(U.num(w.rect.rq) > 0) ? '。数量（㎡）は G' + first + ' に入れてください' : '') : 'E' + p.inputRow + ' からサイズを打つと、保温厚・単位・単価が自動で入ります';
     applyPlan({ ins: p.ins ? { at: p.insAt, n: p.ins } : null, writes: writes, select: sel }, t).then(function (ok) {
       if (!ok) return;
       w.done = { row: p.P, input: p.inputRow, spec: p.writeSpec, lines: ex.lines.length };
-      if (w.item === 'rect') { w.rect.dims = [{ w: '', h: '', l: '' }]; w.rect.rq = ''; }
-      if (w.item === 'box') w.box.boxes = [{ w: '', d: '', h: '', n: '1' }];
+      w.insN = '';
+      if (w.item === 'rect') w.rect.rq = '';
+      if (w.item === 'box') w.box.boxes = [{ w: '', h: '', l: '', n: '1' }];
       w.open = (w.item === 'rect' || w.item === 'box') ? 'extra' : null;
       render();
     });
@@ -769,9 +826,11 @@
   function specCols(spec) {
     var p = UA.specParts(spec);
     var c1 = p.tags.filter(function (t) { return t !== '2層' && t !== '遮音'; }).map(function (t) { return t + '＋'; }).join('') + p.pre.map(function (t) { return t + '＋'; }).join('') + p.facing;
-    return { lead: c1, mat: p.mat, rest: p.rest.join(' ＋ ') || '（なし）' };
+    return { lead: c1, mat: p.mat, rest: p.rest.join('＋') };
   }
-  function specInline(spec) { var c = specCols(spec); return '<span class="spi">' + esc(c.lead) + '<b>' + esc(c.mat) + '</b><span>＋' + esc(c.rest) + '</span></span>'; }
+  // 仕様を1行で（保温材は太字、外装・仕上げはすぐ後ろに続ける）
+  function specText(spec) { var c = specCols(spec); return '<span class="c1">' + esc(c.lead) + '<b>' + esc(c.mat) + '</b></span>' + (c.rest ? '<span class="c2">＋' + esc(c.rest) + '</span>' : ''); }
+  function specInline(spec) { return '<span class="spi">' + specText(spec) + '</span>'; }
   function specBody() {
     var w = st.wiz, gs = specGroups(), flat = [], h = '';
     st.ui.specIdx = flat;
@@ -780,10 +839,10 @@
     h += '<div class="sl-top"><span class="segs" title="この見積書を民間・官庁のどちらとして候補を出すか">' + seg + '</span><button type="button" class="link sm" data-act="specEditMode">' + (st.ui.specEditMode ? '編集を終わる' : '候補を編集') + '</button></div>';
     // 上の仕様の続き（仕様の行は書かない）
     if (cx && cx.spec && U.trimAll(cx.place) === U.trimAll(w.place) && cx.prevKind && cx.prevKind !== 'blank' && cx.prevKind !== 'total') {
-      var i0 = flat.push({ spec: cx.spec, cont: true }) - 1, c0 = specCols(cx.spec);
-      h += '<button type="button" class="srow cont' + (w.cont ? ' on' : '') + '" data-act="specPick" data-v="' + i0 + '"><span class="c0">↳ 上の仕様の続き（仕様の行は書かない）</span><span class="c1">' + esc(c0.lead) + '<b>' + esc(c0.mat) + '</b></span><span class="c2">' + esc(c0.rest) + '</span></button>';
+      var i0 = flat.push({ spec: cx.spec, cont: true }) - 1;
+      h += '<button type="button" class="srow cont' + (w.cont ? ' on' : '') + '" data-act="specPick" data-v="' + i0 + '"><span class="c0">↳ 上の仕様の続き（仕様の行は書かない）</span>' + specText(cx.spec) + '</button>';
     }
-    h += '<div class="scolh"><span>保温材</span><span>外装・仕上げ</span></div>';
+    if (st.ui.specEditMode) h += '<div class="hint">↑↓ で並びを変えられます（このパソコンに記憶）。☆ でいちばん上に固定、✎ で直す、× で候補から外します</div>';
     var shown = 0, hiddenAll = 0;
     gs.forEach(function (g) {
       var folded = g.key === 'all' && !st.ui.showAll && shown >= 3;
@@ -810,18 +869,25 @@
         '<select class="in" data-f="specEditCat"><option value="">民間・官庁とも</option><option value="民間"' + (ed.cat === '民間' ? ' selected' : '') + '>民間だけ</option><option value="官庁"' + (ed.cat === '官庁' ? ' selected' : '') + '>官庁だけ</option></select></div>' +
         '<div class="row"><button type="button" class="ghost" data-act="specCancel">取消</button><button type="button" class="ghost acc" data-act="specSave">保存</button></div></div>';
     }
-    var c = specCols(it.spec), acts = '';
+    var acts = '';
     if (st.ui.specEditMode || gk === 'hidden') {
       if (gk === 'hidden') acts = '<button type="button" class="ic-b" data-act="specUnhide" data-v="' + i + '" title="候補に戻す">戻す</button>';
-      else if (gk !== 'sheet') acts = '<button type="button" class="ic-b' + (it.pin ? ' on' : '') + '" data-act="specPin" data-v="' + i + '" title="' + (it.pin ? '固定をやめる' : 'いちばん上に固定') + '">' + (it.pin ? '★' : '☆') + '</button>' +
+      else if (gk !== 'sheet') acts = '<span class="ud"><button type="button" class="ic-b" data-act="specMove" data-v="' + i + '|-1" title="上へ">↑</button><button type="button" class="ic-b" data-act="specMove" data-v="' + i + '|1" title="下へ">↓</button></span>' +
+        '<button type="button" class="ic-b' + (it.pin ? ' on' : '') + '" data-act="specPin" data-v="' + i + '" title="' + (it.pin ? '固定をやめる' : 'いちばん上に固定') + '">' + (it.pin ? '★' : '☆') + '</button>' +
         '<button type="button" class="ic-b" data-act="specEdit" data-v="' + i + '" title="直す">✎</button>' +
         '<button type="button" class="ic-b" data-act="specHide" data-v="' + i + '" title="' + (it.src === 'local' ? '削除' : '候補から外す（設定マスタは変わりません）') + '">×</button>';
       else acts = '<span class="ic-n" title="この見積書で使っている仕様は、ここでは直せません">—</span>';
     }
     return '<div class="srw' + (on ? ' on' : '') + (gk === 'hidden' ? ' off' : '') + '">' +
       '<button type="button" class="srow" data-act="specPick" data-v="' + i + '" title="(' + esc(it.spec) + ')"' + (gk === 'hidden' ? ' disabled' : '') + '>' +
-      '<span class="c1">' + (it.pin ? '<i class="pin">★</i>' : '') + esc(c.lead) + '<b>' + esc(c.mat) + '</b></span><span class="c2">' + esc(c.rest) + '</span></button>' +
+      (it.pin ? '<i class="pin">★</i>' : '') + specText(it.spec) + '</button>' +
       (acts ? '<span class="srow-a">' + acts + '</span>' : '') + '</div>';
+  }
+  // 角ダクト・BOX：25・50 のボタンと、ほかの厚みの入力欄
+  function ductThickChips(o, act, ff) {
+    var fx = U.thickKey(o.fx), cur = fx || o.f || '';
+    return '<div class="thick"><span class="lbl">保温厚</span>' + ['25', '50'].map(function (t) { return '<button type="button" class="tk' + (!fx && String(cur) === t ? ' on' : '') + '" data-act="' + act + '" data-v="' + t + '">' + t + '</button>'; }).join('') +
+      '<span class="tkx' + (fx ? ' on' : '') + '"><span>ほか</span><input class="in num" data-f="' + ff + '" value="' + esc(o.fx) + '" inputmode="decimal" placeholder="mm" aria-label="ほかの保温厚（mm）"></span></div>';
   }
   function thickChips(cur, act) {
     var tl = (st.master.output && st.master.output.thickList) || ['20', '25', '30', '40', '50', '65', '75'];
@@ -833,8 +899,9 @@
     var t = pr.via === 'rule' ? '計算ルール' : '協会単価 §' + (pr.id || '');
     return '<span class="pc ok" title="' + esc(pr.ref ? pr.ref.y : '') + '">¥' + U.yen(pr.p) + '<small>' + esc(t) + '</small></span>';
   }
-  function extraSumRect() { var ex = extraLines(), r = st.wiz.rect; return esc((r.sub ? r.sub + (r.t16 ? '(1.6t)' : '') + '　' : '') + (ex.g > 0 ? U.fmtQ(ex.g) + '㎡' : '未入力') + '　t' + (ex.f || '')); }
-  function extraSumBox() { var ex = extraLines(); return esc((st.wiz.box.name || 'BOX') + '　' + (ex.lines.length ? ex.lines.length + '台分' : '未入力')); }
+  function extraSumRect() { var ex = extraLines(), r = st.wiz.rect; return esc((r.sub ? r.sub + (r.t16 ? '(1.6t)' : '') + '　' : '') + (ex.g > 0 ? U.fmtQ(ex.g) + '㎡　' : '') + 't' + (ex.f || '')); }
+  function extraSumBox() { var ex = extraLines(), n = ex.lines.filter(function (l) { return !l.head; }).length; return esc((st.wiz.box.name || '名前なし') + '　' + (n ? n + '件' : '寸法未入力') + '　t' + (ex.f || '')); }
+  function sideBtn(k, label) { var on = st.wiz.box.show[k]; return '<button type="button" class="sbtn' + (on ? ' on' : '') + '" data-act="bShow" data-v="' + k + '" aria-pressed="' + on + '" title="' + label + 'を E列に' + (on ? '出す' : '出さない') + '">' + label + '</button>'; }
   function extraBody() {
     var w = st.wiz, h = '';
     if (w.item === 'valve' || w.item === 'flange') {
@@ -847,56 +914,68 @@
     if (w.item === 'rect') {
       var rt = w.rect;
       h += '<div class="lbl">ダクトの種別（D列）</div><div class="chips">' + subsOf('rect').map(function (s) { return chip('rSub', s.id, esc(s.id ? s.label : '（なし）'), rt.sub === s.id); }).join('') + chip('rT16', '1', '(1.6t)', rt.t16) + '</div>';
-      h += '<div class="lbl">寸法　2×(W＋H)×長さ ＝ ㎡</div><div class="dims">' + rt.dims.map(function (d, i) {
-        var a = U.num(d.w) > 0 && U.num(d.h) > 0 && U.num(d.l) > 0 ? 2 * (U.num(d.w) + U.num(d.h)) / 1000 * U.num(d.l) : 0;
-        return '<div class="dr"><input class="in num" data-f="rDim.w" data-k="' + i + '" value="' + esc(d.w) + '" placeholder="W" inputmode="numeric" aria-label="幅mm"><span>×</span>' +
-          '<input class="in num" data-f="rDim.h" data-k="' + i + '" value="' + esc(d.h) + '" placeholder="H" inputmode="numeric" aria-label="高さmm"><span>×</span>' +
-          '<input class="in num" data-f="rDim.l" data-k="' + i + '" value="' + esc(d.l) + '" placeholder="L(m)" inputmode="decimal" aria-label="長さm">' +
-          '<em>' + (a > 0 ? U.fmtQ(Math.round(a * 100) / 100) + '㎡' : '') + '</em><button type="button" class="x" data-act="rDimDel" data-v="' + i + '" aria-label="この行を消す">×</button></div>';
-      }).join('') + '<button type="button" class="ghost sm" data-act="rDimAdd">＋寸法を追加</button></div>';
-      h += '<div class="kv"><span>数量（㎡）</span><input class="in num" data-f="rRq" value="' + esc(rt.rq) + '" placeholder="' + (rectArea() > 0 ? '寸法から ' + U.fmtQ(rectArea()) : '直接入力も可') + '" aria-label="数量（㎡）"><span class="hint">0.1㎡単位で切り上げ</span></div>';
-      h += thickChips(ex.f, 'rF');
+      h += ductThickChips(rt, 'rF', 'rFx');
+      h += '<div class="kv"><span>数量（㎡）</span><input class="in num" data-f="rRq" value="' + esc(rt.rq) + '" placeholder="空欄で可" inputmode="decimal" aria-label="数量（㎡）"><span class="hint">空欄なら G列に直接入れます</span></div>';
       h += '<div class="kv"><span>単価</span>' + priceCap(ex.pr) + (ex.pr && ex.pr.p != null && ex.g > 0 ? '<em>¥' + U.yen(ex.pr.p * ex.g) + '</em>' : '') + '</div>';
       return h;
     }
     if (w.item === 'box') {
-      var bx = w.box, names = subsOf('box').map(function (s) { return s.id || s.label; }).filter(Boolean);
-      if (!names.length) names = ['BOX', 'チャンバー'];
-      h += '<div class="lbl">名前（D列）</div><div class="chips">' + names.map(function (n) { return chip('bName', n, esc(n), bx.name === n); }).join('') + '</div>';
-      h += '<input class="in" data-f="bName" value="' + esc(bx.name) + '" placeholder="例）SMダクト　BOX" aria-label="名前">';
-      h += '<div class="lbl">寸法　W×D×H（mm）と台数</div><div class="dims">' + bx.boxes.map(function (b, i) {
-        var l = ex.lines.filter(function (x) { return x.e === U.num(b.w) + '×' + U.num(b.d) + '×' + U.num(b.h); })[0];
-        return '<div class="dr box"><input class="in num" data-f="bDim.w" data-k="' + i + '" value="' + esc(b.w) + '" placeholder="W" inputmode="numeric" aria-label="W"><span>×</span>' +
-          '<input class="in num" data-f="bDim.d" data-k="' + i + '" value="' + esc(b.d) + '" placeholder="D" inputmode="numeric" aria-label="D"><span>×</span>' +
-          '<input class="in num" data-f="bDim.h" data-k="' + i + '" value="' + esc(b.h) + '" placeholder="H" inputmode="numeric" aria-label="H">' +
+      var bx = w.box, names = [];
+      subsOf('rect').forEach(function (s) { if (s.id) names.push(s.id); });
+      subsOf('box').forEach(function (s) { var n = s.id || s.label; if (n && names.indexOf(n) < 0) names.push(n); });
+      ['BOX', 'チャンバー'].forEach(function (n) { if (names.indexOf(n) < 0) names.push(n); });
+      h += '<div class="lbl">名前（D列に1行で書き、その下の行の E列に寸法）</div><div class="chips">' + names.map(function (n) { return chip('bName', n, esc(n), bx.name === n); }).join('') + '</div>';
+      h += '<input class="in" data-f="bName" value="' + esc(bx.name) + '" placeholder="直接入力も可（例：SMダクト　BOX）" aria-label="名前">';
+      h += '<div class="lbl">寸法（mm）と台数</div><div class="dims">' + bx.boxes.map(function (b, i) {
+        var ok = U.num(b.w) > 0 && U.num(b.h) > 0 && U.num(b.l) > 0;
+        var l = ok ? ex.lines.filter(function (x) { return !x.head; })[bx.boxes.slice(0, i).filter(function (y) { return U.num(y.w) > 0 && U.num(y.h) > 0 && U.num(y.l) > 0; }).length] : null;
+        return '<div class="dr box"><input class="in num" data-f="bDim.w" data-k="' + i + '" value="' + esc(b.w) + '" placeholder="W" inputmode="numeric" aria-label="W（幅）"><span>×</span>' +
+          '<input class="in num" data-f="bDim.h" data-k="' + i + '" value="' + esc(b.h) + '" placeholder="H" inputmode="numeric" aria-label="H（高さ）"><span>×</span>' +
+          '<input class="in num" data-f="bDim.l" data-k="' + i + '" value="' + esc(b.l) + '" placeholder="L" inputmode="numeric" aria-label="L（長さ）">' +
           '<input class="in num n" data-f="bDim.n" data-k="' + i + '" value="' + esc(b.n) + '" inputmode="numeric" aria-label="台数"><span>台</span>' +
           '<button type="button" class="x" data-act="bDel" data-v="' + i + '" aria-label="この行を消す">×</button>' +
-          (l ? '<div class="bres">' + l.area + '㎡　' + priceCap(l.pr) + '</div>' : '') + '</div>';
-      }).join('') + '<button type="button" class="ghost sm" data-act="bAdd">＋BOXを追加</button></div>';
+          (l ? '<div class="bres"><b>E列：' + esc(l.e) + '</b>　' + l.area + '㎡　' + priceCap(l.pr) + '</div>' : '') + '</div>';
+      }).join('') + '<button type="button" class="ghost sm" data-act="bAdd">＋寸法を追加</button></div>';
+      h += '<div class="kv"><span>E列に出す辺</span><div class="sides">' + sideBtn('w', 'W') + sideBtn('h', 'H') + sideBtn('l', 'L') +
+        '<button type="button" class="sbtn sym' + (bx.sym ? ' on' : '') + '" data-act="bSym" aria-pressed="' + bx.sym + '" title="W500×H1000×L500 のように記号を付けます">記号</button></div></div>';
       h += '<div class="kv"><span>面の数</span><div class="segs">' + [[false, '6面'], [true, '5面']].map(function (x) {
-        return '<button type="button" class="seg' + (ex.five === x[0] ? ' on' : '') + '" data-act="bFive" data-v="' + (x[0] ? '1' : '0') + '">' + x[1] + '</button>'; }).join('') + '</div><span class="hint">チャンバー・ガラリは5面。面積×1.1</span></div>';
-      h += thickChips(ex.f, 'bF');
+        return '<button type="button" class="seg' + (ex.five === x[0] ? ' on' : '') + '" data-act="bFive" data-v="' + (x[0] ? '1' : '0') + '">' + x[1] + '</button>'; }).join('') + '</div><span class="hint">面積×1.1。チャンバー・ガラリは5面</span></div>';
+      h += ductThickChips(bx, 'bF', 'bFx');
+      h += '<div class="hint">単価は3辺すべてから計算します（E列に出さない辺も使います）</div>';
       return h;
     }
     return h;
   }
   function writeCard() {
     var w = st.wiz, R = targetRow(), p = wizPlan(), ex = extraLines(), h = '<section class="wcard">';
-    if (w.done && !p) { /* noop */ }
-    if (!R) return h + '<div class="wc-h"><b>書き込む位置</b></div><div class="hint">内訳シートで、書き込みたい行（空き行）を選んでください</div></section>';
+    if (!R) return h + '<div class="wc-h"><b>書き込む位置</b></div><div class="hint">内訳シートで、書き込みたい行を選んでください</div></section>';
     if (!p || !p.ok) return h + '<div class="wc-h"><b>書き込む位置</b></div><div class="hint warn">' + esc(p ? p.message : '準備中') + '</div></section>';
-    h += '<div class="wc-h"><b>書き込む位置</b><span class="wc-r">' + p.P + '行目〜</span><small>Excel で選んでいる行' + (p.P !== R ? 'の下' : '') + '</small></div><div class="wrs">';
+    h += '<div class="wc-h"><b>書き込む位置</b><span class="wc-r">' + p.P + '行目〜</span><small>Excel で選んでいる行</small></div>';
+    if (p.needIns) {
+      var n = p.ins;
+      h += '<div class="insrow"><span class="ins-t">' + esc(p.busy.join('・')) + '行目にデータがあるので、<b>行を挿入</b>して書きます</span>' +
+        '<div class="stepper"><button type="button" class="ic-b" data-act="insN" data-v="-1" aria-label="1行減らす"' + (n <= p.minIns ? ' disabled' : '') + '>−</button>' +
+        '<input class="in num" data-f="insN" value="' + esc(w.insN === '' ? n : w.insN) + '" inputmode="numeric" aria-label="挿入する行数"><span>行</span>' +
+        '<button type="button" class="ic-b" data-act="insN" data-v="1" aria-label="1行増やす">＋</button></div></div>';
+    }
+    h += '<div class="wrs">';
     var r = p.P;
     if (p.writeSpec) { h += '<div class="wr"><span class="rn">' + r + '</span><span class="wt">' + (p.writePlace ? '<i>(' + esc(w.place) + ')</i>' : '') + '(' + esc(U.normSpec(w.spec)) + ')</span></div>'; r++; }
-    if (ex.lines.length) ex.lines.forEach(function (l) { h += '<div class="wr ln"><span class="rn">' + r + '</span><span class="wt">' + esc((l.d ? l.d + '　' : '') + l.e + '　t' + l.f + '　' + U.fmtQ(l.g) + l.h) + '</span>' + priceCap(l.pr) + '</div>'; r++; });
+    if (ex.lines.length) ex.lines.forEach(function (l) {
+      if (l.head) { h += '<div class="wr ln"><span class="rn">' + r + '</span><span class="wt"><i class="dcol">D列</i>' + esc(l.d) + '</span></div>'; r++; return; }
+      var gtx = l.g === '' ? '数量は G列に' : U.fmtQ(l.g) + l.h;
+      h += '<div class="wr ln"><span class="rn">' + r + '</span><span class="wt">' + esc((l.d ? l.d + '　' : '') + l.e + '　t' + l.f + '　' + gtx) + '</span>' + priceCap(l.pr) + '</div>'; r++;
+    });
     else h += '<div class="wr in"><span class="rn">' + r + '</span><span class="wt">' + (w.d ? '<i>' + esc(w.d) + '</i>　' : '') + '<span class="caret"></span>E列にサイズを入力</span></div>';
+    if (p.ins > p.k) for (var e = 0; e < Math.min(p.ins - p.k, 3); e++) h += '<div class="wr add"><span class="rn">' + (p.P + p.k + e) + '</span><span class="wt">（挿入した空き行）</span></div>';
+    if (p.ins > p.k + 3) h += '<div class="wr add"><span class="rn">…</span><span class="wt">ほか ' + (p.ins - p.k - 3) + '行</span></div>';
     h += '</div>';
     var notes = [];
     if (!p.writeSpec) notes.push('上の仕様の続きなので、仕様の行は書きません');
     else if (!p.writePlace) notes.push('室は上と同じなので C列は書きません');
-    if (p.ins) notes.push(p.ins + '行入れます（' + p.insAt + '行目から下は下にずれます）');
+    if (p.ins) notes.push('挿入した行は内訳の初めの書式（A〜J列）にします。' + p.insAt + '行目から下は ' + p.ins + '行下にずれます');
     if (notes.length) h += '<div class="hint">' + esc(notes.join('。')) + '</div>';
-    h += '<button type="button" class="cta" data-act="wWrite"' + (st.ui.busy ? ' disabled' : '') + '>' + (st.ui.busy ? '書き込み中…' : '書き込む') + '</button>';
+    h += '<button type="button" class="cta" data-act="wWrite"' + (st.ui.busy ? ' disabled' : '') + '>' + (st.ui.busy ? '書き込み中…' : p.ins ? p.ins + '行挿入して書き込む' : '書き込む') + '</button>';
     return h + '</section>';
   }
   function logView() {
@@ -1039,6 +1118,7 @@
       });
     } catch (e) { toast(msg(e), 'err'); render(); }
   }
+  function saveBoxUi() { save(K_BOX, { show: st.wiz.box.show, sym: st.wiz.box.sym }); }
   function saveSpecLocal() { if (!save(K_SPECS, st.specLocal)) toast('候補の変更をこのパソコンに記憶できませんでした', 'warn'); }
   function specKindOf() { return UA.KIND_OF_ITEM[st.wiz.item] || st.wiz.item; }
 
@@ -1097,14 +1177,29 @@
         case 'wD': w.d = v || ''; setOpen(null); break;
         case 'rSub': w.rect.sub = v; break;
         case 'rT16': w.rect.t16 = !w.rect.t16; break;
-        case 'rF': w.rect.f = v; break;
-        case 'rDimAdd': w.rect.dims.push({ w: '', h: '', l: '' }); break;
-        case 'rDimDel': w.rect.dims.splice(+v, 1); if (!w.rect.dims.length) w.rect.dims = [{ w: '', h: '', l: '' }]; break;
+        case 'rF': w.rect.f = v; w.rect.fx = ''; break;
         case 'bName': w.box.name = v; w.box.five = null; break;
         case 'bFive': w.box.five = v === '1'; break;
-        case 'bF': w.box.f = v; break;
-        case 'bAdd': w.box.boxes.push({ w: '', d: '', h: '', n: '1' }); break;
-        case 'bDel': w.box.boxes.splice(+v, 1); if (!w.box.boxes.length) w.box.boxes = [{ w: '', d: '', h: '', n: '1' }]; break;
+        case 'bF': w.box.f = v; w.box.fx = ''; break;
+        case 'bShow': w.box.show[v] = !w.box.show[v]; if (!w.box.show.w && !w.box.show.h && !w.box.show.l) { w.box.show[v] = true; toast('少なくとも1つの辺は E列に出します', 'info'); } saveBoxUi(); break;
+        case 'bSym': w.box.sym = !w.box.sym; saveBoxUi(); break;
+        case 'bAdd': w.box.boxes.push({ w: '', h: '', l: '', n: '1' }); break;
+        case 'bDel': w.box.boxes.splice(+v, 1); if (!w.box.boxes.length) w.box.boxes = [{ w: '', h: '', l: '', n: '1' }]; break;
+        case 'insN': { var pn = wizPlan(), cur = U.num(w.insN) || (pn ? pn.ins : 0); w.insN = String(Math.max(pn ? pn.minIns : 1, cur + (+v))); break; }
+        case 'specMove': {
+          var pv = String(v).split('|'), om = st.ui.specIdx[+pv[0]];
+          if (!om) break;
+          var grpItems = st.ui.specIdx.filter(function (x) { return x.grp === om.grp && !x.cont; }).map(function (x) { return x.spec; });
+          var ia = grpItems.indexOf(om.spec), ib = ia + (+pv[1]);
+          if (ia < 0 || ib < 0 || ib >= grpItems.length) break;
+          var tmp2 = grpItems[ia]; grpItems[ia] = grpItems[ib]; grpItems[ib] = tmp2;
+          var okey = specKindOf() + '|' + w.place;
+          st.specLocal.order = st.specLocal.order || {};
+          var keep = (st.specLocal.order[okey] || []).filter(function (sp) { return grpItems.indexOf(sp) < 0; });
+          st.specLocal.order[okey] = keep.concat(grpItems);
+          saveSpecLocal();
+          break;
+        }
         case 'wWrite': fresh(writeWizard); return;
         // 仕様の候補の編集
         case 'specPin': { var op = st.ui.specIdx[+v]; if (op && op.key) { if (st.specLocal.pin[op.key]) delete st.specLocal.pin[op.key]; else st.specLocal.pin[op.key] = true; saveSpecLocal(); } break; }
@@ -1224,7 +1319,9 @@
     if (f === 'specNewPlace' || f === 'specNewCat' || f === 'specEditPlace' || f === 'specEditCat' || f === 're.round') return;
     if (f === 'discount') st.ui.discount = v;
     else if (f === 'rRq') w.rect.rq = v;
-    else if (f.indexOf('rDim.') === 0) w.rect.dims[+k][f.slice(5)] = v;
+    else if (f === 'rFx') w.rect.fx = v;
+    else if (f === 'bFx') w.box.fx = v;
+    else if (f === 'insN') w.insN = v;
     else if (f === 'bName') { w.box.name = v; w.box.five = null; }
     else if (f.indexOf('bDim.') === 0) w.box.boxes[+k][f.slice(5)] = v;
     else if (f.indexOf('re.') === 0 && st.ui.ruleEdit) st.ui.ruleEdit.r[f.slice(3)] = v;

@@ -359,14 +359,17 @@
     if (g1.length) groups.push({ key: 'sheet', title: 'この見積書で使用中（' + place + '）', items: g1 });
     // 候補（マスタ＋このパソコンで追加）
     var cands = [];
+    // BOX・チャンバーは角ダクトの仕様も候補にする
+    var kinds = kind === 'box' ? ['box', 'rect'] : [kind];
+    function kindOK(k) { return k === '共通' || kinds.indexOf(k) >= 0; }
     m.specs.forEach(function (s) {
-      if (!s.use || !(s.kind === kind || s.kind === '共通')) return;
+      if (!s.use || !kindOK(s.kind)) return;
       if (!(s.place === place || s.place === '（全箇所）')) return;
       if (!catOK(s.cat)) return;
       cands.push({ spec: s.spec, kind: s.kind, place: s.place, cat: s.cat, prio: s.prio, src: 'master' });
     });
     (local.add || []).forEach(function (a) {
-      if (!(a.kind === kind || a.kind === '共通')) return;
+      if (!kindOK(a.kind)) return;
       if (!(a.place === place || a.place === '（全箇所）')) return;
       if (!catOK(a.cat)) return;
       cands.push({ spec: a.spec, kind: a.kind, place: a.place, cat: a.cat, prio: 0, src: 'local', id: a.id });
@@ -378,8 +381,12 @@
       if ((local.hide || {})[c.key]) { hidden.push(c); return false; }
       return true;
     });
+    var ord = (local.order || {})[kind + '|' + place] || [], oi = {};
+    ord.forEach(function (sp, i) { if (oi[sp] == null) oi[sp] = i; });
     cands.sort(function (a, b) {
       if (a.pin !== b.pin) return a.pin ? -1 : 1;
+      var oa = oi[a.spec], ob = oi[b.spec];
+      if (oa != null || ob != null) return (oa == null ? 1e6 : oa) - (ob == null ? 1e6 : ob);
       var pa = a.prio > 0 ? a.prio : 9999, pb = b.prio > 0 ? b.prio : 9999;
       if (pa !== pb) return pa - pb;
       if (a.here !== b.here) return a.here ? -1 : 1;
@@ -1515,9 +1522,9 @@
     if (parts.length === 3 || parts.length === 2) {
       var dims = [], ok = true;
       parts.forEach(function (p, i) {
-        var mm = p.match(/^([WDHwdh]?)(\d+(?:\.\d+)?)([WDHwdh]?)$/);
+        var mm = p.match(/^([WDHLwdhl]?)(\d+(?:\.\d+)?)([WDHLwdhl]?)$/);
         if (!mm) { ok = false; return; }
-        dims.push({ v: +mm[2], k: (mm[1] || mm[3] || '').toUpperCase(), i: i });
+        dims.push({ v: +mm[2], k: (mm[1] || mm[3] || '').toUpperCase().replace('L', 'D'), i: i });
       });
       if (ok && parts.length === 3) {
         var o = {}, order = ['W', 'D', 'H'];
@@ -1537,10 +1544,11 @@
   };
   // VP（硬質塩ビ管）の呼び → 単価に使う鋼管の呼び径（A）。30VP は 32A、ほかは同じ数字
   UA.VP_TO_A = { 30: 32 };
-  // BOX・チャンバーの表面積（VBA「見積単価自動入力」と同じ。6面＝2(WD+WH+DH)×1.1、5面＝(WD+2WH+2DH)×1.1）
+  // BOX・チャンバーの表面積（VBA「見積単価自動入力」と同じ。W×D×H（D＝奥行・長さ L）で
+  //   6面＝2(WH+WD+HD)×1.1、5面＝(WH+2WD+2HD)×1.1（W×H の面が1面だけ）
   UA.boxArea = function (b, five) {
     var w = b.w / 1000, d = b.d / 1000, h = b.h / 1000;
-    var a = five ? (w * d + 2 * w * h + 2 * d * h) * 1.1 : 2 * (w * d + w * h + d * h) * 1.1;
+    var a = five ? (w * h + 2 * w * d + 2 * h * d) * 1.1 : 2 * (w * h + w * d + h * d) * 1.1;
     return Math.round(a * 1e4) / 1e4;
   };
   // 5面か（チャンバー・ガラリ・名前の末尾が G）
@@ -1852,7 +1860,7 @@
       formula = '=ROUNDUP(' + ex + '*' + area + ',-1)';
       p = roundVal(p * area, 'up10');
       ref.y += ' ×面積' + area + '㎡（' + (five ? '5面' : '6面') + '×1.1）';
-      ref.aa = sz.text + '（' + area + '㎡）';
+      ref.aa = sz.text + '（' + area + '㎡・' + (five ? '5面' : '6面') + '）';
     } else if (q.item === 'rect' && sz.wh) ref.aa = '（㎡単価）' + sz.text;
     return { p: p, formula: formula, ref: ref, via: 'sk', approx: r.approx, id: r.id };
     function noPrice(why) { return { p: null, why: why, ref: { y: '単価なし：' + why, z: '', aa: sizeLabel(q.item, sz), ab: q.f ? q.f + 'mm' : '' } }; }
@@ -2129,9 +2137,7 @@
   UA.specWritePlan = function (sc, R, sel) {
     var res = { ok: false };
     if (!(R >= sc.startRow)) { res.message = sc.startRow + '行目より下の行を選んでください'; return res; }
-    var me = sc.rows[R];
-    var isBlank = !me || me.blank;
-    var P = isBlank ? R : R + 1;
+    var P = R;
     var x = UA.ctxAt(sc, P);
     if (x.after) { res.message = '「工事費　計」・経費・見積条件より上の行を選んでください'; return res; }
     var prev = sc.rows[P - 1];
@@ -2140,9 +2146,14 @@
     var writeSpec = !(same && inBlock);
     var writePlace = writeSpec && !(x.placeSys && trimAll(x.placeSys) === trimAll(sel.place));
     var nLines = sel.lines && sel.lines.length ? sel.lines.length : 1;
-    var k = (writeSpec ? 1 : 0) + nLines, b = 0;
-    while (b < k && (!sc.rows[P + b] || sc.rows[P + b].blank)) b++;
-    res.ok = true; res.P = P; res.k = k; res.ins = k - b; res.insAt = P + b; res.ctx = x; res.same = same; res.inBlock = !!inBlock;
+    var k = (writeSpec ? 1 : 0) + nLines;
+    // 書く行（少なくとも選んだ行と次の行）にデータがあれば、選んだ行に行を挿入して書く
+    var busy = [];
+    for (var i = 0; i < Math.max(2, k); i++) { var o = sc.rows[P + i]; if (o && !o.blank) busy.push(P + i); }
+    var need = busy.length > 0;
+    var n = need ? Math.max(k, Math.floor(num(sel.insN)) || k) : 0;
+    res.ok = true; res.P = P; res.k = k; res.ins = n; res.insAt = P; res.needIns = need; res.busy = busy; res.minIns = k;
+    res.ctx = x; res.same = same; res.inBlock = !!inBlock;
     res.writeSpec = writeSpec; res.writePlace = writePlace;
     res.specRow = writeSpec ? P : null;
     res.inputRow = P + (writeSpec ? 1 : 0);
