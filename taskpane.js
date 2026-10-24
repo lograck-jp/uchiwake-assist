@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.9';
+  var VERSION = '2.0.10';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -1211,7 +1211,8 @@
           var changed = w.item !== v;
           w.item = v; w.done = null;
           if (changed) { w.spec = ''; w.cont = false; w.d = ''; }
-          setOpen(nextOpen());
+          // 品目を変えたら、室 → 仕様 → … を1つずつ開き直す（室は前の選択を残したまま、押し直すだけで進める）
+          setOpen(changed ? 'place' : nextOpen());
           break;
         }
         case 'wPlace': {
