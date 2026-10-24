@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.8';
+  var VERSION = '2.0.9';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -388,14 +388,15 @@
     });
   }
   function numOrText(v) { var t = U.toHalf(v); return /^\d+(\.\d+)?$/.test(t) ? parseFloat(t) : v; }
-  function runElbow() {
+  function runElbow(kind) {
     var o = st.master && st.master.output || {};
-    var p = UA.elbowPlan(st.sc, st.grid, targetRow(), { rate: o.elbowRate || 0.35, label: o.elbowLabel || 'エルボ' });
+    var lb = kind === 'MD継手' ? 'MD継手' : (o.elbowLabel || 'エルボ');
+    var p = UA.elbowPlan(st.sc, st.grid, targetRow(), { rate: o.elbowRate || 0.35, label: lb });
     if (!p.ok) { toast(p.message, 'warn'); render(); return; }
     var writes = p.writes.slice(), jf = ((st.grid.f[p.at - 1] || [])[9]);
     if (!p.ins && U.isEmpty(jf)) writes.push({ r: p.at, col: 'J', v: jTpl(p.at) });
     applyPlan({ ins: p.ins, writes: writes, select: p.select },
-      (p.ins ? p.ins.n + '行挿入して、' : '') + p.at + '行目に「エルボ 1式」を' + (p.update ? '書き直しました' : '入れました') + '（単位 m の明細 ' + p.lines + '行 × ' + p.rate + '、約 ¥' + U.yen(p.est) + '）').then(render);
+      (p.ins ? p.ins.n + '行挿入して、' : '') + p.at + '行目に「' + lb + ' 1式」を' + (p.update ? '書き直しました' : '入れました') + '（単位 m の明細 ' + p.lines + '行 × ' + p.rate + '、約 ¥' + U.yen(p.est) + '）').then(render);
   }
   function priceSelected() {
     if (!st.sel.rows.length) { toast('内訳で単価を入れたい行を選んでください（Ctrl を押しながら離れた範囲も選べます）', 'warn'); render(); return; }
@@ -1111,7 +1112,7 @@
     var s = st.sel, n = s.sheet === st.target ? s.rows.length : 0;
     var info = n ? (s.areas > 1 ? s.areas + 'か所・' : '') + n + '行を選択中' : '行を選ぶと単価を入れられます';
     return '<footer class="ft"><span class="ft-i">' + esc(info) + '</span>' +
-      '<button type="button" class="ftbtn sub" data-act="elbow"' + (n && !st.ui.busy ? '' : ' disabled') + ' title="選んでいる行の塊（仕様の行の下の明細）の下に「エルボ 1式」を入れます。L列＝ROUNDUP(単位 m の明細の J列の合計×K列,-1)">＋エルボ1式</button><button type="button" class="ftbtn" data-act="priceSel"' + (n && !st.ui.busy ? '' : ' disabled') + ' title="選んでいる行（離れた範囲も可）の見積単価を入れ直します。参照元は Y〜AB列">' + svg(ICON.yen) + '選択行に単価</button></footer>';
+      ['エルボ', 'MD継手'].map(function (lb) { return '<button type="button" class="ftbtn sub" data-act="elbow" data-v="' + lb + '"' + (n && !st.ui.busy ? '' : ' disabled') + ' title="選んでいる行の塊（仕様の行の下の明細）の下に「' + lb + ' 1式」を入れます。L列＝ROUNDUP(単位 m の明細の J列の合計×K列,-1)">＋' + lb + '</button>'; }).join('') + '<button type="button" class="ftbtn" data-act="priceSel"' + (n && !st.ui.busy ? '' : ' disabled') + ' title="選んでいる行（離れた範囲も可）の見積単価を入れ直します。参照元は Y〜AB列">' + svg(ICON.yen) + '選択行に単価</button></footer>';
   }
   function toastView() {
     var t = st.ui.toast;
@@ -1321,7 +1322,7 @@
         case 'ruleReset': saveRules(UA.defaultCalcRules()); toast('初めの設定に戻しました', 'ok'); break;
         // そのほか
         case 'priceSel': readSelection().then(priceSelected); return;
-        case 'elbow': fresh(runElbow); return;
+        case 'elbow': fresh(function () { runElbow(v); }); return;
         case 'undo': undoLast(); return;
         case 'closeToast': st.ui.toast = null; break;
         default: return;

@@ -2206,7 +2206,8 @@
     if (!B || !rows.some(function (x) { return x.kind === 'spec' || x.kind === 'line'; })) { res.message = '選んでいる行の塊（仕様の行の下の明細）が見つかりません'; return res; }
     var lines = rows.filter(function (x) { return x.kind === 'line' && nk(String(x.H)).replace(/\s/g, '') === 'm'; });
     if (!lines.length) { res.message = 'この塊に単位「m」の明細がありません'; return res; }
-    var elb = rows.filter(function (x) { return x.kind === 'other' && /エルボ/.test(String(x.E)) && trimAll(x.H) === '式'; })[0];
+    var lk = nk(label).replace(/\s/g, '');
+    var elb = rows.filter(function (x) { return x.kind === 'other' && nk(String(x.E)).replace(/\s/g, '').indexOf(lk) >= 0 && trimAll(x.H) === '式'; })[0];
     var last = 0; rows.forEach(function (x) { if (/line|other|dhead|spec/.test(x.kind)) last = Math.max(last, x.r); });
     var t, ins = null;
     if (elb) t = elb.r;
