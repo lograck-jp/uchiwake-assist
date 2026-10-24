@@ -2217,7 +2217,18 @@
       if (nxo && nxo.kind === 'total') ins = { at: t, n: 1 };
       else { var b = 0; while (b < 2 && blankRow(t + b)) b++; if (b < 2) ins = { at: t + b, n: 2 - b }; }
     }
-    var refs = lines.map(function (x) { return 'J' + x.r; });
+    // 続いている行は「J8:J12」のようにまとめる（あいだが空き行だけならつなぐ。GV など m 以外の行があれば分ける）
+    var isM = {}; lines.forEach(function (x) { isM[x.r] = true; });
+    var refs = [], s0 = null, e0 = null;
+    lines.forEach(function (x) {
+      if (s0 != null) {
+        var ok = true; for (var q = e0 + 1; q < x.r; q++) { var oq = sc.rows[q]; if (!(oq && oq.blank)) { ok = false; break; } }
+        if (ok) { e0 = x.r; return; }
+        refs.push(s0 === e0 ? 'J' + s0 : 'J' + s0 + ':J' + e0);
+      }
+      s0 = x.r; e0 = x.r;
+    });
+    if (s0 != null) refs.push(s0 === e0 ? 'J' + s0 : 'J' + s0 + ':J' + e0);
     var formula = '=ROUNDUP(SUM(' + refs.join(',') + ')*K' + t + ',-1)';
     var writes = [
       { r: t, col: 'E', v: label, align: 'Right' }, { r: t, col: 'G', v: 1 }, { r: t, col: 'H', v: '式' },
