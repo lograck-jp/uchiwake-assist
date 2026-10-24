@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.1';
+  var VERSION = '2.0.2';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -610,9 +610,9 @@
     { id: 'rA', kind: 'range', col: 'A', grp: '集計', label: 'A列', tip: '大項目の見出しから下の明細を合計' },
     { id: 'rB', kind: 'range', col: 'B', grp: '集計', label: 'B列', tip: '系統の見出しから下の明細を合計' },
     { id: 'rC', kind: 'range', col: 'C', grp: '集計', label: 'C列', tip: '室（施工箇所）の見出しから下の明細を合計' },
-    { id: 'sA', kind: 'sub', col: 'A', grp: '小計', label: 'A列', tip: '大項目の中の計の行（系統の計）を合計' },
-    { id: 'sB', kind: 'sub', col: 'B', grp: '小計', label: 'B列', tip: '系統の中の計の行（室の計）を合計' },
-    { id: 'grand', kind: 'grand', grp: '計', label: '工事費 計', tip: '大項目の計を合計' },
+    { id: 'sA', kind: 'sub', col: 'A', grp: '小計', label: 'A列', tip: '大項目の見出しの下にある計（集計）を合計' },
+    { id: 'sB', kind: 'sub', col: 'B', grp: '小計', label: 'B列', tip: '系統の見出しの下にある計（集計）を合計' },
+    { id: 'grand', kind: 'grand', grp: '計', label: '工事費 計', tip: '小計を入れた所は小計を、集計だけの所は集計を合計（小計に入っている集計は足さない）' },
     { id: 'total', kind: 'total', grp: '計', label: '合計', tip: '工事費計から下（経費まで）を合計' }
   ];
   function totalPlanOf(def) {

@@ -1923,6 +1923,39 @@
       if (opt.full === false) { var mm = s.match(/^(.*?)[.．]/); if (mm) s = mm[1]; }
       return s;
     }
+    function grandLabel(t) { var s = trimAll(t); return /^工事費/.test(s) || s === '合計' || s === '総合計' || /^出精値引/.test(s); }
+    function spanText(rows) { return rows.length === 1 ? rows[0] + '行目' : rows[0] + '〜' + rows[rows.length - 1] + '行目'; }
+    // from〜to 行の計（J列が =SUM）のうち、ほかの計に入っていないもの。
+    // 範囲（J7:J62）に入っている行・名指し（J63,J78）された行は「入っている」とみなす。
+    // loose＝どの計にも入っていない金額の明細（大項目ごと）
+    function outerTotals(from, to) {
+      var refd = {}, cands = [], lines = [], out = { refs: [], loose: [] };
+      if (!(to >= from)) return out;
+      for (var r = from; r <= to; r++) {
+        if (isSum(r)) {
+          var re = /\$?J\$?(\d+)(?:\s*:\s*\$?J\$?(\d+))?/gi, m;
+          while ((m = re.exec(f(r)))) {
+            var a1 = +m[1], b1 = m[2] ? +m[2] : a1;
+            if (a1 > b1) { var tmp = a1; a1 = b1; b1 = tmp; }
+            for (var x = Math.max(a1, from); x <= Math.min(b1, to); x++) if (x !== r) refd[x] = true;
+          }
+          if (!grandLabel(v(r, C.I))) cands.push(r);
+        } else {
+          var jv = v(r, C.J);
+          if (typeof jv === 'number' && jv !== 0) lines.push(r);
+        }
+      }
+      out.refs = cands.filter(function (r2) { return !refd[r2]; });
+      var groups = [], byHead = {};
+      lines.filter(function (r2) { return !refd[r2]; }).forEach(function (r2) {
+        var h = '';
+        for (var i = r2; i >= TOP; i--) { var a = txt(i, C.A); if (a) { h = String(a).replace(/[()（）]/g, '').trim(); break; } }
+        if (!byHead[h]) { byHead[h] = { head: h, rows: [] }; groups.push(byHead[h]); }
+        byHead[h].rows.push(r2);
+      });
+      out.loose = groups;
+      return out;
+    }
     var res = { ok: false, kind: kind };
     if (!(R >= TOP + 1)) { res.message = (TOP + 1) + '行目より下の行を選んでください'; return res; }
     if (kind === 'range' || kind === 'sub' || kind === 'grand') {
@@ -1945,53 +1978,59 @@
       }
       if (head === R) { res.message = R + '行目は見出しの行です。明細の下の空き行を選んでください'; return res; }
       if (!cnt3) { res.message = '合計する明細が見つかりません'; return res; }
-      lab = (head ? disp(v(head, ci)) : '') + '　計';
+      // 上の計で止まったとき（同じ見出しの下で2回目の集計）も、ラベルには見出しの名前を付ける
+      // （VBA は「　計」だけになっていた）
+      var nameRow = head;
+      if (!head && stop) {
+        for (var j0 = stop - 1; j0 >= TOP; j0--) {
+          if (txt(j0, ci)) { nameRow = j0; break; }
+          var left = false; for (var c0 = 0; c0 < ci; c0++) if (txt(j0, c0)) left = true;
+          if (left) break;
+        }
+      }
+      lab = (nameRow ? disp(v(nameRow, ci)) : '') + '　計';
       fm = '=SUM(' + jc + cnt3 + ':' + jc + Dg + ')';
       res.from = cnt3; res.head = head;
-      if (!head) res.warn = col + '列の見出しが見つからないため、' + (stop ? stop + '行目の計' : TOP + '行目') + 'の下から合計します';
+      if (!head && !nameRow) res.warn = col + '列の見出しが見つからないため、' + (stop ? stop + '行目の計' : TOP + '行目') + 'の下から合計します';
     } else if (kind === 'sub') {
-      var s1 = [], s2 = [], head2 = null;
+      // 見出し（同じ列。B列の小計は大項目の見出しでも止める）の下にある計のうち、
+      // ほかの計に入っていないもの（＝いちばん外側の計）を合計する。
+      // VBA は「カンマ入りの SUM があればそれだけ」だったため、=SUM(J272) のような
+      // 1つだけの小計が混ざると漏れていた
+      var head2 = null, stopA = null;
       for (var i2 = R; i2 >= TOP; i2--) {
-        var t2 = txt(i2, ci);
-        if (!t2) { var fx = f(i2); if (/^=SUM\(.*,.*\)$/i.test(fx)) s1.push(i2); else if (/^=SUM\(/i.test(fx)) s2.push(i2); }
-        else { head2 = i2; break; }
+        if (txt(i2, ci)) { head2 = i2; break; }
+        if (ci > C.A && txt(i2, C.A)) { stopA = i2; break; }
       }
-      refs = (s1.length ? s1 : s2).slice().sort(function (a, b2) { return a - b2; });
-      if (!refs.length) { res.message = (head2 ? '「' + String(v(head2, ci)).trim() + '」の下に' : '') + '計の行（=SUM の式）が見つかりません'; return res; }
+      var from2 = (head2 || stopA || TOP) + 1;
+      if (head2 === R) { res.message = R + '行目は見出しの行です。計の下の空き行を選んでください'; return res; }
+      refs = outerTotals(from2, P - 1).refs;
+      if (!refs.length) { res.message = (head2 ? '「' + String(v(head2, ci)).trim() + '」の下に' : '') + '計の行（=SUM の式）が見つかりません。先に集計を入れてください'; return res; }
       lab = (head2 ? disp(v(head2, ci)) : '') + '　計';
       fm = '=SUM(' + refs.map(function (x) { return jc + x; }).join(',') + ')';
       res.head = head2; res.refs = refs;
       if (!head2) res.warn = col + '列の見出しが見つかりません';
     } else if (kind === 'grand') {
-      var heads = [], curH = null, missing = [];
-      for (var i3 = TOP; i3 <= R; i3++) {
-        var a = txt(i3, C.A);
-        if (a) {
-          if (isBoundA(a)) break;
-          curH = { r: i3, key: headKey(a), num: (nfkc(a).match(/^\s*(\d+)\s*[.．]/) || [])[1] || null, text: a.trim(), tot: null };
-          heads.push(curH); continue;
-        }
-        var lb = v(i3, C.I);
-        if (curH && !curH.tot && isTotalLabel(lb) && isSum(i3)) {
-          var k = headKey(lb);
-          if (k === curH.key || (curH.num && k === curH.num)) curH.tot = i3;
-        }
+      // 小計を入れた大項目は小計を、集計だけの大項目は集計を合計する
+      // （ほかの計に入っている計は除く＝いちばん外側の計だけ）。上に工事費計があればその下から
+      var start = TOP, prevG = null;
+      for (var i3 = TOP; i3 < P; i3++) if (headKey(v(i3, C.I)) === '工事費' && isSum(i3)) { prevG = i3; start = i3 + 1; }
+      var ot = outerTotals(start, P - 1);
+      refs = ot.refs;
+      if (!refs.length) {
+        if (prevG) { res.message = prevG + '行目の工事費計より下に、計の行がありません'; return res; }
+        var anyHead = false;
+        for (var i4 = TOP; i4 < P; i4++) if (txt(i4, C.A) && !isBoundA(txt(i4, C.A))) { anyHead = true; break; }
+        if (anyHead) { res.message = '計の行（集計・小計）が見つかりません。先に集計を入れてください'; return res; }
+        fm = '=SUM(' + jc + (TOP + 1) + ':' + jc + Dg + ')'; res.warn = '計の行が無いため、明細全体を合計します';
+      } else {
+        var warns = [];
+        if (prevG) warns.push(prevG + '行目の工事費計より下を合計します');
+        if (ot.loose.length) warns.push(ot.loose.slice(0, 3).map(function (x) { return (x.head ? '「' + x.head + '」の' : '') + spanText(x.rows); }).join('、') + (ot.loose.length > 3 ? 'ほか' : '') + 'の明細が、どの計にも入っていません');
+        if (warns.length) res.warn = warns.join('。');
       }
-      heads.forEach(function (h) { if (h.tot) refs.push(h.tot); else missing.push(h.text); });
-      if (!heads.length) {
-        // 大項目が無い見積：系統の計をまとめる。系統の計も無ければ範囲で合計
-        var sysT = [], curB = null;
-        for (var i4 = TOP; i4 <= R; i4++) {
-          var bt = txt(i4, C.B); if (bt) { curB = headKey(bt); continue; }
-          var lb2 = v(i4, C.I);
-          if (curB && isTotalLabel(lb2) && isSum(i4) && headKey(lb2) === curB) { sysT.push(i4); curB = null; }
-        }
-        if (sysT.length) { refs = sysT; res.warn = '大項目が無いため、系統の計を合計します'; }
-        else { fm = '=SUM(' + jc + (TOP + 1) + ':' + jc + Dg + ')'; res.warn = '大項目・系統の計が無いため、明細全体を合計します'; }
-      } else if (!refs.length) { res.message = '大項目の計（例「1.配管設備　計」）が見つかりません。先に A列の集計・小計を入れてください'; return res; }
-      if (missing.length && heads.length) res.warn = '「' + missing.join('」「') + '」の計が無いため、工事費計に入っていません';
       if (!fm) fm = '=SUM(' + refs.map(function (x) { return jc + x; }).join(',') + ')';
-      lab = '工事費　計'; res.refs = refs;
+      lab = '工事費　計'; res.refs = refs; res.loose = ot.loose;
     } else if (kind === 'total') {
       var w = null;
       for (var i5 = R; i5 >= TOP; i5--) if (headKey(v(i5, C.I)) === '工事費' && isSum(i5)) { w = i5; break; }
