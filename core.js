@@ -205,6 +205,18 @@
       if (a && b) m.normalize.push({ from: a, to: b, col: c.charAt(0).toUpperCase(), on: on === '○' || on === '〇' });
     });
 
+    // v2：単価の計算ルール（シートがあればそれを既定にする。パネルで直したものはパソコンに記憶）
+    if (sheets['M_単価計算']) {
+      m.calcRulesRaw = sheets['M_単価計算'].map(function (r, i) {
+        var base = str(pick(r, '基準'));
+        return {
+          id: 'M' + (i + 1), on: useOK(pick(r, '使用する')), name: str(pick(r, '名前')), items: listOf(pick(r, '品目ID')),
+          words: str(pick(r, 'D列に含む語')), min: str(pick(r, 'サイズ以上')), max: str(pick(r, 'サイズ以下')),
+          base: !base || base === '直管' ? 'run' : 'kind', baseKind: !base || base === '直管' ? '' : base,
+          factor: num(pick(r, '係数')) || 1, round: roundKey(str(pick(r, '端数'))), memo: str(pick(r, 'メモ'))
+        };
+      }).filter(function (x) { return x.name || x.words; });
+    }
     if (!m.kinds.length) errors.push('M_品目 に品目がありません');
     m.errors = errors;
     return UA.indexMaster(m);
@@ -1470,6 +1482,672 @@
       if ((mm = k.match(/^(\d+)[:=](\d+(?:\.\d+)?)$/))) { r.sizes.push({ n: +mm[1], g: mm[2], s: '' }); continue; }
     }
     return r;
+  };
+
+  /* =====================================================================
+     v2.0
+     - 行ごとの文脈（大項目・系統・室・仕様・種別）を1回の走査で求める（UA.scan）
+     - Excel に直接打ったサイズから、品目・保温厚・単位・単価を決める（自動入力）
+     - 単価の計算ルール（GV 50A以下＝直管×1.1 など。画面で追加・編集できる）
+     - 計・小計・工事費計・合計・出精値引き（見積書の VBA「集計」を移植。不具合は直してある）
+     - 経費（資材運搬交通費・諸経費・法定福利費）
+     ===================================================================== */
+  var C = { A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7, I: 8, J: 9 };
+  UA.COL = C;
+  function nfkc(s) { var t = String(s == null ? '' : s); try { return t.normalize('NFKC'); } catch (e) { return toHalf(t); } }
+  function isBoundA(t) { var a = trimAll(t); return a === '経費' || a === '見積条件' || a.charAt(0) === '一' || a.charAt(0) === '※'; }
+  UA.isBoundA = isBoundA;
+  // 計の行のラベル（I列）か
+  function isTotalLabel(t) { var s = trimAll(t); return !!s && (/計$/.test(s) || s === '出精値引' || s === '出精値引き'); }
+  // ラベル・見出しの比較用（空白・括弧・末尾の「計」を除く）
+  function headKey(t) { return trimAll(nfkc(t)).replace(/[()（）]/g, '').replace(/計$/, ''); }
+  UA.headKey = headKey;
+
+  /* ---------- サイズの書き方 ---------- */
+  // 50 / 50A / 20Su / 30VP / φ200 / 200φ / 矩形 / 500×300 / 1000×3300×1500（W×D×H。W・D・H の文字があればそれを優先）
+  UA.parseSize = function (e) {
+    if (typeof e === 'number') return isFinite(e) && e > 0 ? { n: e, ser: '', text: String(e) } : null;
+    var t = nfkc(e).replace(/\s+/g, '');
+    if (!t) return null;
+    if (t === '矩形') return { rect: true, text: '矩形' };
+    var u = t.replace(/[xX＊*✕]/g, '×');
+    var parts = u.split('×');
+    if (parts.length === 3 || parts.length === 2) {
+      var dims = [], ok = true;
+      parts.forEach(function (p, i) {
+        var mm = p.match(/^([WDHwdh]?)(\d+(?:\.\d+)?)([WDHwdh]?)$/);
+        if (!mm) { ok = false; return; }
+        dims.push({ v: +mm[2], k: (mm[1] || mm[3] || '').toUpperCase(), i: i });
+      });
+      if (ok && parts.length === 3) {
+        var o = {}, order = ['W', 'D', 'H'];
+        dims.forEach(function (d) { if (d.k && o[d.k] == null) o[d.k] = d.v; else if (d.k) d.k = ''; });
+        dims.forEach(function (d) { if (d.k) return; var k = order.filter(function (x) { return o[x] == null; })[0]; if (k) o[k] = d.v; });
+        if (o.W > 0 && o.D > 0 && o.H > 0) return { box: { w: o.W, d: o.D, h: o.H }, text: u };
+      }
+      if (ok && parts.length === 2) return { wh: [dims[0].v, dims[1].v], text: u };
+      return null;
+    }
+    var m = u.match(/^([φΦФ]?)(\d+(?:\.\d+)?)(A|SU|Su|su|VP|vp|Vp|φ|Φ|Ф|mm|MM)?$/);
+    if (!m) return null;
+    var n = +m[2], s = (m[3] || '').toUpperCase();
+    if (!(n > 0)) return null;
+    var ser = m[1] || s === 'Φ' || s === 'Ф' || m[3] === 'φ' ? 'φ' : s === 'A' ? 'A' : s === 'SU' ? 'Su' : s === 'VP' ? 'VP' : '';
+    return { n: n, ser: ser, text: u };
+  };
+  // VP（硬質塩ビ管）の呼び → 単価に使う鋼管の呼び径（A）。30VP は 32A、ほかは同じ数字
+  UA.VP_TO_A = { 30: 32 };
+  // BOX・チャンバーの表面積（VBA「見積単価自動入力」と同じ。6面＝2(WD+WH+DH)×1.1、5面＝(WD+2WH+2DH)×1.1）
+  UA.boxArea = function (b, five) {
+    var w = b.w / 1000, d = b.d / 1000, h = b.h / 1000;
+    var a = five ? (w * d + 2 * w * h + 2 * d * h) * 1.1 : 2 * (w * d + w * h + d * h) * 1.1;
+    return Math.round(a * 1e4) / 1e4;
+  };
+  // 5面か（チャンバー・ガラリ・名前の末尾が G）
+  UA.isFiveSided = function (name) { var t = nfkc(name).trim(); return /チャンバー|ガラリ/.test(t) || /G$/i.test(t); };
+
+  /* ---------- 品目の区分（配管系／ダクト系） ---------- */
+  function famOfCtx(m, x) {
+    var a = String(x.area || ''), s = String(x.sys || ''), sp = String(x.spec || '');
+    if (/ダクト/.test(a)) return 'duct';
+    if (/配管|衛生|給排水|給湯|冷暖房|機器/.test(a)) return 'pipe';
+    var sd = m && m.systems ? m.systems.filter(function (y) { return y.name && trimAll(y.name) === trimAll(s); })[0] : null;
+    if (sd) return sd.fam;
+    if (/ダクト|排煙|給気|排気|外気|還気/.test(s)) return 'duct';
+    if (/管$|管\s*\(|水|ドレン|冷媒|蒸気/.test(s)) return 'pipe';
+    if (/筒/.test(sp)) return 'pipe';
+    if (/ロール|帯|波形|ウェーブ|フェルト|ブランケット|板|鋲/.test(sp)) return 'duct';
+    return 'pipe';
+  }
+  UA.famOfCtx = famOfCtx;
+  var PIPE_D = /^(SUS|SGP|VP|VU|HIVP|HTVP|鋼管|白管|黒管|銅管|CU|PE|ポリ管|架橋|ライニング|LP|DVLP|SGP-VA|SGP-VB)/i;
+  // 明細の品目を決める（D列の種別・E列のサイズ・文脈から）
+  UA.guessItem = function (m, x) {
+    var sz = x.sz; if (!sz) return null;
+    if (sz.box) return 'box';
+    if (sz.rect || sz.wh) return 'rect';
+    var d = nk(x.d || ''), subs = (m && m.subs) || {};
+    function inSubs(k) { return (subs[k] || []).some(function (s) { return s.id && nk(s.id) === d; }); }
+    var duct = famOfCtx(m, x) === 'duct';
+    if (sz.ser === 'Su' || sz.ser === 'VP') return 'pipe';
+    if (d) {
+      if (PIPE_D.test(d)) return 'pipe';
+      if (inSubs('flange') || /^(FLG|フランジ)/i.test(d)) return 'flange';
+      if (duct || /ダクト|フレックス/.test(d)) {
+        if (sz.ser === 'A') return inSubs('valve') ? 'valve' : 'pipe';
+        return 'round';
+      }
+      return 'valve';
+    }
+    if (sz.ser === 'A') return 'pipe';
+    if (sz.ser === 'φ') return 'round';
+    return duct ? 'round' : 'pipe';
+  };
+  function clsOf(item) { return item === 'valve' || item === 'flange' ? 'piece' : item; }
+  UA.clsOf = clsOf;
+
+  /* ---------- シートの走査 ---------- */
+  // values/formulas：1行目からの2次元配列（A列〜、J列まで以上）。戻り値 { rows:[行番号→情報], lines:[明細], last }
+  UA.scan = function (values, formulas, m, startRow) {
+    startRow = startRow || 5;
+    var out = { rows: [], lines: [], last: values.length, startRow: startRow, bound: null, grand: null };
+    var cur = { area: '', areaRow: 0, sys: '', sysRow: 0, sysId: 0, place: '', placeRow: 0, placeSys: '', spec: null, specRow: 0, blockId: 0, d: '', dRow: 0, after: false };
+    var blockSeq = 0, sysSeq = 0;
+    function g(r, c) { var row = values[r - 1]; var v = row ? row[c] : ''; return v == null ? '' : v; }
+    function gf(r) { var row = formulas && formulas[r - 1]; var v = row ? row[C.J] : ''; return typeof v === 'string' ? v : ''; }
+    for (var r = 1; r <= values.length; r++) {
+      var A = g(r, C.A), B = g(r, C.B), Cc = g(r, C.C), D = g(r, C.D), E = g(r, C.E), F = g(r, C.F), G = g(r, C.G), H = g(r, C.H), I = g(r, C.I), J = g(r, C.J);
+      var o = { r: r, A: A, B: B, C: Cc, D: D, E: E, F: F, G: G, H: H, I: I, J: J, jf: gf(r) };
+      o.blank = [A, B, Cc, D, E, F, G, H, I].every(isEmpty);
+      var aT = typeof A === 'string' ? A.trim() : '';
+      if (r < startRow) { o.kind = 'head'; }
+      else if (cur.after) { o.kind = o.blank ? 'blank' : (aT ? 'bound' : (isTotalLabel(I) ? 'total' : 'after')); if (aT === '経費') o.exp = true; }
+      else if (o.blank) { o.kind = 'blank'; cur.d = ''; cur.dRow = 0; }
+      else if (aT && !isNumLike(aT)) {
+        if (isBoundA(aT)) { o.kind = 'bound'; cur.after = true; if (!out.bound) out.bound = r; }
+        else { o.kind = 'area'; cur.area = aT; cur.areaRow = r; cur.sys = ''; cur.sysRow = 0; cur.placeSys = ''; cur.spec = null; cur.specRow = 0; cur.d = ''; cur.blockId = ++blockSeq; cur.sysId = ++sysSeq; }
+      }
+      else if (isTotalLabel(I) && isEmpty(G) && isEmpty(H)) {
+        o.kind = 'total'; o.label = String(I).trim();
+        if (headKey(I) === '工事費' && !out.grand) out.grand = r;
+        cur.spec = null; cur.specRow = 0; cur.d = ''; cur.blockId = ++blockSeq;
+      }
+      else if (!isEmpty(B)) {
+        o.kind = 'sys'; cur.sys = String(B).trim(); cur.sysRow = r; cur.placeSys = ''; cur.spec = null; cur.specRow = 0; cur.d = ''; cur.blockId = ++blockSeq; cur.sysId = ++sysSeq;
+        if (isParen(Cc)) { cur.place = trimAll(stripParen(Cc)); cur.placeRow = r; cur.placeSys = cur.place; }
+        if (isParen(E)) { cur.spec = normSpec(E); cur.specRow = r; }
+      }
+      else if (isParen(Cc) || isParen(E)) {
+        o.kind = 'spec';
+        if (isParen(Cc)) { cur.place = trimAll(stripParen(Cc)); cur.placeRow = r; cur.placeSys = cur.place; }
+        if (isParen(E)) { cur.spec = normSpec(E); cur.specRow = r; }
+        cur.d = isEmpty(D) ? '' : String(D).trim(); cur.dRow = cur.d ? r : 0; cur.blockId = ++blockSeq;
+      }
+      else {
+        var sz = UA.parseSize(E);
+        if (sz) {
+          o.kind = 'line'; o.sz = sz;
+          if (!isEmpty(D)) { cur.d = String(D).trim(); cur.dRow = r; }
+        } else if (!isEmpty(D) && isEmpty(E) && isEmpty(G)) {
+          o.kind = 'dhead'; cur.d = String(D).trim(); cur.dRow = r;
+        } else o.kind = 'other';
+      }
+      o.area = cur.area; o.areaRow = cur.areaRow; o.sys = cur.sys; o.sysRow = cur.sysRow; o.sysId = cur.sysId; o.place = cur.place; o.placeSys = cur.placeSys;
+      o.spec = cur.spec; o.specRow = cur.specRow; o.blockId = cur.blockId; o.d = cur.d; o.after = cur.after && o.kind !== 'bound' ? true : cur.after;
+      if (o.kind === 'line') {
+        o.item = UA.guessItem(m, { sz: o.sz, d: o.d, area: o.area, sys: o.sys, spec: o.spec });
+        o.cls = clsOf(o.item);
+        out.lines.push(o);
+      }
+      out.rows[r] = o;
+    }
+    return out;
+  };
+  // 行 r に書いたときの文脈（r の行の D 列は d で渡す。r が表の外でも使える）
+  UA.ctxAt = function (sc, r, d) {
+    var prev = null;
+    for (var k = Math.min(r - 1, sc.rows.length - 1); k >= 1; k--) { if (sc.rows[k]) { prev = sc.rows[k]; break; } }
+    var me = sc.rows[r];
+    var base = prev || { area: '', sys: '', place: '', placeSys: '', spec: null, specRow: 0, blockId: 0, sysId: 0, d: '' };
+    var x = { row: r, area: base.area, sys: base.sys, sysId: base.sysId, place: base.place, placeSys: base.placeSys, spec: base.spec, specRow: base.specRow, blockId: base.blockId, after: !!base.after || (prev && prev.kind === 'bound') };
+    // 1行上が空行なら、上の明細の種別は引き継がない
+    var dUp = prev && prev.kind !== 'blank' ? base.d : '';
+    x.d = !isEmpty(d) ? String(d).trim() : dUp;
+    x.prevKind = prev ? prev.kind : '';
+    if (me && me.kind === 'spec') x.isSpecRow = true;
+    return x;
+  };
+
+  /* ---------- 保温厚・単位の推定 ---------- */
+  function bestOf(cnt) { var b = null, n = 0; Object.keys(cnt).forEach(function (k) { if (cnt[k] > n) { n = cnt[k]; b = k; } }); return b; }
+  function fStr(v) { return isEmpty(v) ? '' : thickKey(v); }
+  // 近い明細（上を優先し、無ければ下）
+  function nearest(L, r, pred) {
+    var up = null, dn = null;
+    for (var i = 0; i < L.length; i++) { var l = L[i]; if (l.r === r || !pred(l)) continue; if (l.r < r) up = l; else if (!dn) dn = l; }
+    return up || dn;
+  }
+  function szKey(sz) { return sz ? (sz.n != null ? sizeKey(sz.n) : sizeKey(sz.text)) : ''; }
+  function isDuctCls(c) { return c === 'rect' || c === 'box'; }
+  // 戻り値 { f, from }
+  UA.guessThick = function (sc, m, x, item, sz, r) {
+    var cls = clsOf(item), sk = szKey(sz), L = sc.lines, l;
+    var kind = KIND_OF_ITEM[item] || item, dk = nk(x.d || '');
+    function hasF(q) { return !!fStr(q.F); }
+    function sameCls(q) { return isDuctCls(cls) ? isDuctCls(q.cls) : q.cls === cls; }
+    function sameSize(q) { return szKey(q.sz) === sk; }
+    // 同じ塊の明細に保温厚が書かれていない（鉛・撤去など）ときは入れない
+    var near0 = nearest(L, r, function (q) { return q.blockId === x.blockId && (!isEmpty(q.G) || !isEmpty(q.I)); });
+    if ((near0 && !hasF(near0)) || /鉛|撤去|分別/.test(x.spec || '')) return { f: '', from: '保温厚を書かない仕様' };
+    if (isDuctCls(cls)) {
+      // 角ダクト・BOX：同じ仕様の塊で同じ種別 → すぐ上（下）の明細 → 見積書の同じ仕様
+      l = nearest(L, r, function (q) { return q.blockId === x.blockId && sameCls(q) && hasF(q) && dk && nk(q.d) === dk; });
+      if (l) return { f: fStr(l.F), from: '同じ種別（' + l.r + '行目）' };
+      l = nearest(L, r, function (q) { return q.blockId === x.blockId && sameCls(q) && hasF(q); });
+      if (l) return { f: fStr(l.F), from: '同じ仕様の明細（' + l.r + '行目）' };
+      if (x.spec) { l = nearest(L, r, function (q) { return q.spec === x.spec && sameCls(q) && hasF(q); }); if (l) return { f: fStr(l.F), from: 'この見積書の同じ仕様（' + l.r + '行目）' }; }
+    } else {
+      // 1) 同じ塊（同じ仕様の行の下）の同じ種別・同じサイズ
+      l = nearest(L, r, function (q) { return q.blockId === x.blockId && sameCls(q) && hasF(q) && sameSize(q) && (cls !== 'piece' || nk(q.d) === dk); });
+      if (l) return { f: fStr(l.F), from: '同じ仕様の' + sizeLabel(item, sz) + '（' + l.r + '行目）' };
+      if (cls === 'piece') {
+        // 2) バルブ・フランジ：同じ塊の配管（直管）の同じサイズ → 同じ厚み
+        l = nearest(L, r, function (q) { return q.blockId === x.blockId && q.cls === 'pipe' && hasF(q) && sameSize(q); });
+        if (l) return { f: fStr(l.F), from: '同じ仕様の配管 ' + sk + 'A（' + l.r + '行目）と同じ' };
+        //    別の仕様（ロールなど）の塊：同じ系統の配管の同じサイズから 25以下→25、50以下→50
+        l = nearest(L, r, function (q) { return x.sysId && q.sysId === x.sysId && q.cls === 'pipe' && hasF(q) && sameSize(q); });
+        if (l) {
+          var vt = UA.valveThick(fStr(l.F), m && m.output && m.output.valveThick);
+          return { f: vt, from: '配管 ' + sk + 'A の ' + fStr(l.F) + 'mm（' + l.r + '行目）から' };
+        }
+        l = nearest(L, r, function (q) { return q.blockId === x.blockId && q.cls === 'piece' && hasF(q); });
+        if (l && x.spec && !/筒/.test(x.spec)) return { f: fStr(l.F), from: '同じ仕様の' + (l.d || 'バルブ') + '（' + l.r + '行目）と同じ' };
+      }
+      // 3) この見積書の同じ仕様・同じサイズ（いちばん多い厚み）
+      if (x.spec) {
+        var cnt = {}, at = {};
+        L.forEach(function (q) { if (q.r !== r && q.spec === x.spec && sameCls(q) && hasF(q) && sameSize(q)) { var f = fStr(q.F); cnt[f] = (cnt[f] || 0) + 1; at[f] = at[f] || q.r; } });
+        var b = bestOf(cnt);
+        if (b) return { f: b, from: 'この見積書の同じ仕様・' + sizeLabel(item, sz) + '（' + at[b] + '行目など）' };
+        // 4) 同じ仕様で、前後のサイズの厚みが同じならその厚み
+        if (sz.n != null) {
+          var lo = null, hi = null;
+          L.forEach(function (q) {
+            if (q.r === r || q.spec !== x.spec || !sameCls(q) || !hasF(q) || q.sz.n == null) return;
+            if (q.sz.n < sz.n && (!lo || q.sz.n > lo.sz.n)) lo = q;
+            if (q.sz.n > sz.n && (!hi || q.sz.n < hi.sz.n)) hi = q;
+          });
+          if (lo && hi && fStr(lo.F) === fStr(hi.F)) return { f: fStr(lo.F), from: '同じ仕様の' + sizeLabel(item, lo.sz) + '・' + sizeLabel(item, hi.sz) + 'と同じ' };
+        }
+      }
+    }
+    // 5) 設定マスタの標準厚（サイズ別 → 全サイズ）
+    var t1 = m && m.thickIdx ? m.thickIdx[kind + '|' + (x.spec || '') + '|' + sk] : null;
+    if (t1) return { f: thickKey(t1), from: '標準厚（M_標準厚・' + sizeLabel(item, sz) + '）' };
+    var t2 = m && m.thickIdx ? m.thickIdx[kind + '|' + (x.spec || '') + '|（全サイズ）'] : null;
+    if (t2) return { f: thickKey(t2), from: '標準厚（M_標準厚）' };
+    // 6) 同じ塊のすぐ上の明細 → 既定
+    l = nearest(L, r, function (q) { return q.blockId === x.blockId && sameCls(q) && hasF(q); });
+    if (l) return { f: fStr(l.F), from: '近くの行（' + l.r + '行目）と同じ' };
+    return { f: DEFAULT_THICK[kind] || '25', from: '既定の厚み' };
+  };
+  function sizeLabel(item, sz) {
+    if (!sz) return '';
+    if (sz.box || sz.wh || sz.rect) return sz.text;
+    if (sz.ser === 'Su') return sz.n + 'Su';
+    if (sz.ser === 'VP') return sz.n + 'VP';
+    if (item === 'round' || sz.ser === 'φ') return 'φ' + sz.n;
+    return sz.n + 'A';
+  }
+  UA.sizeLabel = sizeLabel;
+  var PIECE_D = /継手|エルボ|チーズ|T管|フレックス|フレキ/;
+  UA.guessUnit = function (sc, m, x, item, r) {
+    var cls = clsOf(item), L = sc.lines, l, dk = nk(x.d || '');
+    var meP = cls === 'piece' || (!!dk && PIECE_D.test(dk));
+    function hasH(q) { return !isEmpty(q.H); }
+    function pz(q) { return q.cls === 'piece' || (!!q.d && PIECE_D.test(nk(q.d))) || PIECE_UNITS.indexOf(String(q.H).trim()) >= 0; }
+    function sameD(q) { return hasH(q) && q.cls === cls && !!dk && nk(q.d) === dk; }
+    function sameK(q) { return hasH(q) && q.cls === cls && pz(q) === meP; }
+    function inB(q) { return q.blockId === x.blockId; }
+    function inS(q) { return !!x.sysId && q.sysId === x.sysId; }
+    l = nearest(L, r, function (q) { return inB(q) && sameD(q); }) || nearest(L, r, function (q) { return inB(q) && sameK(q); }) ||
+      nearest(L, r, function (q) { return inS(q) && sameD(q); }) || nearest(L, r, function (q) { return inS(q) && sameK(q); }) ||
+      nearest(L, r, sameD);
+    if (l) return String(l.H).trim();
+    var cnt = {}; L.forEach(function (q) { if (q.r !== r && sameK(q)) { var h = String(q.H).trim(); cnt[h] = (cnt[h] || 0) + 1; } });
+    var b = bestOf(cnt); if (b) return b;
+    if (item === 'box') return '台';
+    if (meP) { var pc = {}; L.forEach(function (q) { var h = hasH(q) ? String(q.H).trim() : ''; if (PIECE_UNITS.indexOf(h) >= 0) pc[h] = (pc[h] || 0) + 1; }); return bestOf(pc) || 'ヶ'; }
+    var k = m && m.kindById ? m.kindById[item] : null;
+    var u = k && k.unit ? k.unit : (item === 'rect' ? '㎡' : 'm');
+    return UA.normalizeOut(m, 'H', u);
+  };
+
+  /* ---------- 単価の計算ルール ---------- */
+  var ROUND_LABEL = { up10: '1の位切り上げ', up100: '10の位切り上げ', up1: '1円未満切り上げ', none: '端数そのまま' };
+  var ROUND_HINT = { up10: '10円単位に切り上げ（例 4,741 → 4,750）', up100: '100円単位に切り上げ（例 4,741 → 4,800）', up1: '1円単位に切り上げ（例 4,741.2 → 4,742）', none: '計算したまま（切り上げない）' };
+  UA.ROUND_LABEL = ROUND_LABEL; UA.ROUND_HINT = ROUND_HINT;
+  function roundKey(t) { var s = trimAll(t); if (!s || /1の位|10円/.test(s)) return 'up10'; if (/10の位|100円/.test(s)) return 'up100'; if (/1円|小数/.test(s)) return 'up1'; if (/なし|そのまま/.test(s)) return 'none'; return 'up10'; }
+  UA.roundKey = roundKey;
+  UA.defaultCalcRules = function () {
+    return [
+      { id: 'flex', on: true, name: 'フレックス継手（補修）', items: ['round'], words: 'フレックス継手、フレキ継手、継手補修', min: '', max: '', base: 'run', baseKind: '', factor: 0.8, round: 'up10', memo: '既存マクロ「継手補修×0.8」と同じ' },
+      { id: 'gv50', on: true, name: 'GV（50A以下）', items: ['valve'], words: 'GV', min: '', max: '50', base: 'run', baseKind: '', factor: 1.1, round: 'up10', memo: '' },
+      { id: 'pump', on: false, name: 'ラインポンプ', items: ['valve'], words: 'ラインポンプ', min: '', max: '', base: 'kind', baseKind: 'GV', factor: 1.5, round: 'up10', memo: '既存マクロにある掛率（確認してから使ってください）' },
+      { id: 'ystr', on: false, name: 'Yスト', items: ['valve'], words: 'Yスト', min: '', max: '', base: 'kind', baseKind: 'GV', factor: 1.2, round: 'up10', memo: '既存マクロにある掛率（確認してから使ってください）' }
+    ];
+  };
+  function wordsOf(w) { return String(w == null ? '' : w).split(/[、,，\s]+/).map(function (x) { return nk(x); }).filter(Boolean); }
+  UA.wordsOf = wordsOf;
+  UA.matchCalcRule = function (rules, q) {
+    if (!rules) return null;
+    var d = nk(q.d || ''), n = q.sz && q.sz.n;
+    for (var i = 0; i < rules.length; i++) {
+      var r = rules[i];
+      if (!r.on) continue;
+      var its = r.items && r.items.length ? r.items : ['*'];
+      if (its.indexOf('*') < 0 && its.indexOf(q.item) < 0) continue;
+      var ws = wordsOf(r.words);
+      if (ws.length && !ws.some(function (w) { return d.indexOf(w) >= 0; })) continue;
+      if (!isEmpty(r.min) && !(n >= num(r.min))) continue;
+      if (!isEmpty(r.max) && !(n <= num(r.max))) continue;
+      if (r.base === 'kind' && r.baseKind && nk(r.baseKind) === d) continue;   // 自分自身を基準にしない
+      return r;
+    }
+    return null;
+  };
+  function roundExpr(expr, mode) { return mode === 'up10' ? 'ROUNDUP(' + expr + ',-1)' : mode === 'up100' ? 'ROUNDUP(' + expr + ',-2)' : mode === 'up1' ? 'ROUNDUP(' + expr + ',0)' : expr; }
+  function roundVal(v, mode) {
+    function up(x, k) { return Math.ceil(x / k - 1e-9) * k; }
+    return mode === 'up10' ? up(v, 10) : mode === 'up100' ? up(v, 100) : mode === 'up1' ? up(v, 1) : Math.round(v * 100) / 100;
+  }
+  UA.roundVal = roundVal;
+  function itemLabel(m, id) { var k = m && m.kindById && m.kindById[id]; return k ? k.label : ({ pipe: '配管', valve: 'バルブ類', flange: 'フランジ類', rect: '角ダクト', round: '丸ダクト', box: 'BOX' })[id] || id; }
+  UA.itemLabel = itemLabel;
+  UA.describeRule = function (r, m) {
+    var its = (r.items || []).filter(function (x) { return x && x !== '*'; });
+    var who = its.length ? its.map(function (x) { return itemLabel(m, x); }).join('・') : 'すべての品目';
+    var ws = String(r.words || '').split(/[、,，\s]+/).filter(Boolean);
+    var cond = [];
+    if (ws.length) cond.push('D列に「' + ws.join('」「') + '」');
+    if (!isEmpty(r.min) && !isEmpty(r.max)) cond.push(num(r.min) + '〜' + num(r.max));
+    else if (!isEmpty(r.min)) cond.push(num(r.min) + '以上');
+    else if (!isEmpty(r.max)) cond.push(num(r.max) + '以下');
+    var base = r.base === 'kind' && r.baseKind ? '同じ仕様の「' + r.baseKind + '」' : '同じ仕様の直管';
+    return { when: who + (cond.length ? '（' + cond.join('・') + '）' : ''), then: base + ' × ' + fmtN(num(r.factor) || 1), round: ROUND_LABEL[r.round] || ROUND_LABEL.up10 };
+  };
+
+  /* ---------- 明細1行の単価 ----------
+     q = { item, d, place, spec, sz, f }
+     help.findBase({item, d, sz, f}) → { row, i(数値) } シート上の基準の行（直管など）
+     戻り値 { p, formula, ref:{y,z,aa,ab}, via:'rule'|'sk', approx } / { p:null, why, ref } */
+  UA.priceLine = function (sk, m, rules, q, help, depth) {
+    depth = depth || 0;
+    var sz = q.sz;
+    if (!sz) return { p: null, why: 'サイズを読み取れません' };
+    var rule = depth < 3 ? UA.matchCalcRule(rules, q) : null;
+    if (rule) return ruleLine(sk, m, rules, q, help, depth, rule);
+    if (!sk) return noPrice('保温積算資料が未読込');
+    var look = sz.n, conv = '', size;
+    if (q.item === 'rect') size = '矩形';
+    else if (q.item === 'box') size = sz.box ? sz.text : 'BOX';   // 寸法で書いた BOX は「BOX＋1,000円」を足さない（VBA と同じ）
+    else {
+      if (sz.ser === 'Su' || (q.item === 'pipe' && /^SUS$/i.test(String(q.d || '').trim()))) {
+        var su = (m && m.sizes && m.sizes.Su || []).filter(function (z) { return z.n === sz.n; })[0];
+        var ps = su && su.priceSize != null ? su.priceSize : (SU_DEFAULT.filter(function (x) { return x[0] === sz.n; })[0] || [])[1];
+        if (ps == null) return noPrice(sz.n + 'Su に当たる鋼管のサイズがありません（M_サイズ の「単価に使うサイズ」）');
+        look = ps; conv = sz.n + 'Su（' + ps + 'A相当）';
+      } else if (sz.ser === 'VP') { look = UA.VP_TO_A[sz.n] || sz.n; conv = sz.n + 'VP（' + look + 'A相当）'; }
+      size = look;
+    }
+    var dd = /^SUS$/i.test(String(q.d || '').trim()) ? '' : q.d;
+    var r = UA.skLook(sk, m, { item: q.item, d: dd, place: q.place, spec: q.spec, size: size, f: q.f });
+    if (r.p == null) return noPrice(r.why && r.why !== 'nomatch' ? r.why : '対応する表がありません（M_積算資料対応）');
+    var ref = Object.assign({}, r.ref), formula = r.formula, p = r.p;
+    if (conv) ref.aa = conv;
+    if (q.item === 'box' && sz.box) {
+      var five = q.five != null ? !!q.five : UA.isFiveSided(q.d || '');
+      var area = UA.boxArea(sz.box, five);
+      var ex = formula ? '(' + formula.slice(1) + ')' : String(p);
+      formula = '=ROUNDUP(' + ex + '*' + area + ',-1)';
+      p = roundVal(p * area, 'up10');
+      ref.y += ' ×面積' + area + '㎡（' + (five ? '5面' : '6面') + '×1.1）';
+      ref.aa = sz.text + '（' + area + '㎡）';
+    } else if (q.item === 'rect' && sz.wh) ref.aa = '（㎡単価）' + sz.text;
+    return { p: p, formula: formula, ref: ref, via: 'sk', approx: r.approx, id: r.id };
+    function noPrice(why) { return { p: null, why: why, ref: { y: '単価なし：' + why, z: '', aa: sizeLabel(q.item, sz), ab: q.f ? q.f + 'mm' : '' } }; }
+  };
+  function ruleLine(sk, m, rules, q, help, depth, rule) {
+    var baseItem = rule.base === 'kind' ? q.item : (q.item === 'round' || q.item === 'rect' || q.item === 'box' ? 'round' : 'pipe');
+    var baseD = rule.base === 'kind' ? rule.baseKind : '';
+    var baseName = rule.base === 'kind' ? rule.baseKind : '直管';
+    var fac = num(rule.factor) || 1, expr, val, from, z = '';
+    var hit = help && help.findBase ? help.findBase({ item: baseItem, d: baseD, sz: q.sz, f: q.f }) : null;
+    if (hit && hit.i != null) {
+      expr = 'I' + hit.row; val = hit.i; from = baseName + '＝' + hit.row + '行目の単価';
+    } else {
+      var bq = Object.assign({}, q, { item: baseItem, d: baseD });
+      var bp = UA.priceLine(sk, m, rules, bq, help, depth + 1);
+      if (bp.p == null) {
+        var why = '計算ルール「' + rule.name + '」の基準（' + baseName + ' ' + sizeLabel(baseItem, q.sz) + (q.f ? ' ' + q.f + 'mm' : '') + '）の単価がありません';
+        return { p: null, why: why, ref: { y: '単価なし：' + why + (bp.why ? '（' + bp.why + '）' : ''), z: '', aa: sizeLabel(q.item, q.sz), ab: q.f ? q.f + 'mm' : '' } };
+      }
+      expr = bp.formula ? '(' + bp.formula.slice(1) + ')' : String(bp.p); val = bp.p;
+      from = baseName + '＝' + (bp.ref && bp.ref.y ? bp.ref.y.replace(/^単価なし：/, '') : '') + '（' + yen(bp.p) + '円）';
+      z = bp.ref ? bp.ref.z : '';
+    }
+    var formula = '=' + roundExpr(expr + '*' + fmtN(fac), rule.round);
+    var p = roundVal(val * fac, rule.round);
+    var y = '計算：' + rule.name + '　' + baseName + '×' + fmtN(fac) + '（' + (ROUND_LABEL[rule.round] || '') + '）｜' + from;
+    return { p: p, formula: formula, ref: { y: y, z: z || ('同じ仕様の' + baseName), aa: sizeLabel(q.item, q.sz), ab: q.f ? q.f + 'mm' : '' }, via: 'rule', rule: rule };
+  }
+  // 計算ルールの基準になる行（同じ塊の直管・指定の種別で、同じサイズ。同じ厚みを優先）
+  UA.findBaseLine = function (sc, x, r, b) {
+    var sk = szKey(b.sz), dk = nk(b.d || ''), best = null;
+    sc.lines.forEach(function (q) {
+      if (q.r === r || q.blockId !== x.blockId || szKey(q.sz) !== sk || typeof q.I !== 'number') return;
+      if (b.d ? nk(q.d) !== dk : (q.item !== b.item || (q.d && PIECE_D.test(nk(q.d))) || PIECE_UNITS.indexOf(String(q.H).trim()) >= 0)) return;
+      var sc2 = (fStr(q.F) === fStr(b.f) ? 2 : 0) + (q.r < r ? 1 : 0);
+      if (!best || sc2 > best.s) best = { s: sc2, row: q.r, i: q.I };
+    });
+    return best;
+  };
+  // 自動入力が書いた単価か（Y列の書き方で見分ける）
+  UA.isAutoRef = function (y) { return typeof y === 'string' && /^(§|単価なし：|計算：)/.test(y.trim()); };
+
+  /* ---------- 計・小計・工事費計・合計・出精値引き（VBA「集計」の移植） ----------
+     g = { v: values, f: formulas }（1行目から、A〜J列）。R＝選んでいる行。
+     kind：'range'（A/B/C列 集計＝見出しの下から範囲の合計）／'sub'（A/B列 小計＝計の行の合計）
+           'grand'（工事費 計）／'total'（合計）／'discount'（出精値引き）
+     戻り値 { ok, message, warn, at（書き始めの行）, k（使う行数）, ins（入れる行数）, insAt, writes:[{r,col,v}], diag:[行], label, formula, select } */
+  var TOP = 4;
+  UA.totalPlan = function (g, R, kind, opt) {
+    opt = opt || {};
+    var col = opt.col || 'A', ci = C[col];
+    function v(r, c) { var row = g.v[r - 1]; var x = row ? row[c] : ''; return x == null ? '' : x; }
+    function f(r) { var row = g.f && g.f[r - 1]; var x = row ? row[C.J] : ''; return typeof x === 'string' ? x.replace(/\s/g, '') : ''; }
+    function blank(r) { for (var c = 0; c <= C.I; c++) if (!isEmpty(v(r, c))) return false; return true; }
+    function txt(r, c) { var x = v(r, c); return typeof x === 'string' && !isEmpty(x) && !isNumLike(x) ? x : ''; }
+    function isSum(r) { return /^=SUM\(/i.test(f(r)); }
+    function label(r) { return trimAll(v(r, C.I)); }
+    function disp(t) {
+      var s = String(t).replace(/[()（）]/g, '').trim();
+      if (opt.full === false) { var mm = s.match(/^(.*?)[.．]/); if (mm) s = mm[1]; }
+      return s;
+    }
+    var res = { ok: false, kind: kind };
+    if (!(R >= TOP + 1)) { res.message = (TOP + 1) + '行目より下の行を選んでください'; return res; }
+    if (kind === 'range' || kind === 'sub' || kind === 'grand') {
+      // 経費・見積条件より下では使わない
+      for (var ib = R; ib >= TOP; ib--) { var ab = txt(ib, C.A); if (ab && isBoundA(ab)) { res.message = '「' + ab.trim().slice(0, 8) + '」より下では使えません'; return res; } if (headKey(v(ib, C.I)) === '工事費' && kind !== 'grand') { res.message = '工事費計より下では使えません'; return res; } }
+    }
+    // 書き込む位置：選んだ行が空き行ならそこから、明細などが入っていればその下から
+    var need = kind === 'discount' ? 3 : 2;
+    var P = blank(R) ? R : R + 1, b = 0;
+    while (b < need && P + b <= g.v.length + need && blank(P + b)) b++;
+    res.at = P; res.k = need; res.ins = need - b; res.insAt = P + b;
+    var Dg = P, T = P + 1, jc = 'J';
+    var writes = [], refs = [], lab = '', fm = '';
+    if (kind === 'range') {
+      var cnt3 = 0, head = null, stop = null;
+      for (var i = R; i >= TOP; i--) {
+        var t = txt(i, ci);
+        if (!t) { if (isSum(i)) { stop = i; break; } cnt3 = i; }
+        else { head = i; break; }
+      }
+      if (head === R) { res.message = R + '行目は見出しの行です。明細の下の空き行を選んでください'; return res; }
+      if (!cnt3) { res.message = '合計する明細が見つかりません'; return res; }
+      lab = (head ? disp(v(head, ci)) : '') + '　計';
+      fm = '=SUM(' + jc + cnt3 + ':' + jc + Dg + ')';
+      res.from = cnt3; res.head = head;
+      if (!head) res.warn = col + '列の見出しが見つからないため、' + (stop ? stop + '行目の計' : TOP + '行目') + 'の下から合計します';
+    } else if (kind === 'sub') {
+      var s1 = [], s2 = [], head2 = null;
+      for (var i2 = R; i2 >= TOP; i2--) {
+        var t2 = txt(i2, ci);
+        if (!t2) { var fx = f(i2); if (/^=SUM\(.*,.*\)$/i.test(fx)) s1.push(i2); else if (/^=SUM\(/i.test(fx)) s2.push(i2); }
+        else { head2 = i2; break; }
+      }
+      refs = (s1.length ? s1 : s2).slice().sort(function (a, b2) { return a - b2; });
+      if (!refs.length) { res.message = (head2 ? '「' + String(v(head2, ci)).trim() + '」の下に' : '') + '計の行（=SUM の式）が見つかりません'; return res; }
+      lab = (head2 ? disp(v(head2, ci)) : '') + '　計';
+      fm = '=SUM(' + refs.map(function (x) { return jc + x; }).join(',') + ')';
+      res.head = head2; res.refs = refs;
+      if (!head2) res.warn = col + '列の見出しが見つかりません';
+    } else if (kind === 'grand') {
+      var heads = [], curH = null, missing = [];
+      for (var i3 = TOP; i3 <= R; i3++) {
+        var a = txt(i3, C.A);
+        if (a) {
+          if (isBoundA(a)) break;
+          curH = { r: i3, key: headKey(a), num: (nfkc(a).match(/^\s*(\d+)\s*[.．]/) || [])[1] || null, text: a.trim(), tot: null };
+          heads.push(curH); continue;
+        }
+        var lb = v(i3, C.I);
+        if (curH && !curH.tot && isTotalLabel(lb) && isSum(i3)) {
+          var k = headKey(lb);
+          if (k === curH.key || (curH.num && k === curH.num)) curH.tot = i3;
+        }
+      }
+      heads.forEach(function (h) { if (h.tot) refs.push(h.tot); else missing.push(h.text); });
+      if (!heads.length) {
+        // 大項目が無い見積：系統の計をまとめる。系統の計も無ければ範囲で合計
+        var sysT = [], curB = null;
+        for (var i4 = TOP; i4 <= R; i4++) {
+          var bt = txt(i4, C.B); if (bt) { curB = headKey(bt); continue; }
+          var lb2 = v(i4, C.I);
+          if (curB && isTotalLabel(lb2) && isSum(i4) && headKey(lb2) === curB) { sysT.push(i4); curB = null; }
+        }
+        if (sysT.length) { refs = sysT; res.warn = '大項目が無いため、系統の計を合計します'; }
+        else { fm = '=SUM(' + jc + (TOP + 1) + ':' + jc + Dg + ')'; res.warn = '大項目・系統の計が無いため、明細全体を合計します'; }
+      } else if (!refs.length) { res.message = '大項目の計（例「1.配管設備　計」）が見つかりません。先に A列の集計・小計を入れてください'; return res; }
+      if (missing.length && heads.length) res.warn = '「' + missing.join('」「') + '」の計が無いため、工事費計に入っていません';
+      if (!fm) fm = '=SUM(' + refs.map(function (x) { return jc + x; }).join(',') + ')';
+      lab = '工事費　計'; res.refs = refs;
+    } else if (kind === 'total') {
+      var w = null;
+      for (var i5 = R; i5 >= TOP; i5--) if (headKey(v(i5, C.I)) === '工事費' && isSum(i5)) { w = i5; break; }
+      if (!w) for (var i6 = R; i6 >= TOP; i6--) if (isSum(i6)) { w = i6; break; }
+      if (!w) { res.message = '工事費計（=SUM の式）が見つかりません'; return res; }
+      lab = '合計'; fm = '=SUM(' + jc + w + ':' + jc + Dg + ')'; res.from = w;
+    } else if (kind === 'discount') {
+      var amt = num(opt.amount);
+      if (!(amt > 0)) { res.message = '決定金額を入れてください'; return res; }
+      var gr = null;
+      for (var i7 = R; i7 >= TOP; i7--) if (label(i7) === '合計') { gr = i7; break; }
+      if (!gr) { res.message = '「合計」の行が見つかりません。先に合計を入れてください'; return res; }
+      writes.push({ r: P, col: 'I', v: '出精値引' }, { r: P, col: 'J', v: '=SUM(' + Math.round(amt) + '-' + jc + gr + ')' });
+      Dg = P + 1; T = P + 2;
+      lab = '総合計'; fm = '=SUM(' + jc + gr + ':' + jc + P + ')'; res.from = gr; res.amount = amt;
+    }
+    writes.push({ r: Dg, col: 'J', v: '', diag: true });
+    writes.push({ r: T, col: 'I', v: lab }, { r: T, col: 'J', v: fm });
+    res.ok = true; res.writes = writes; res.diag = [Dg]; res.label = lab; res.formula = fm; res.totalRow = T; res.select = T + 1;
+    return res;
+  };
+
+  /* ---------- 経費 ---------- */
+  UA.EXPENSE_DEFAULT = {
+    transport: { on: true, label: '資材運搬交通費', k: 0.05, l: -3 },
+    misc: { on: true, label: '諸経費', k: 0.12, l: -3 },
+    welfare: { on: true, label: '法定福利費', k: 0.55, l: 0.15188 }
+  };
+  var EXP_KEYS = ['transport', 'misc', 'welfare'];
+  UA.EXP_KEYS = EXP_KEYS;
+  function expMatch(key, c) { var t = trimAll(c); return key === 'transport' ? /運搬|交通費|駐車場/.test(t) : key === 'misc' ? /諸経費/.test(t) : /法定福利/.test(t); }
+  // 材工の見積か（A列に「資材費」「労務費」の大項目がある）
+  UA.expenseInfo = function (g) {
+    function v(r, c) { var row = g.v[r - 1]; var x = row ? row[c] : ''; return x == null ? '' : x; }
+    function f(r) { var row = g.f && g.f[r - 1]; var x = row ? row[C.J] : ''; return typeof x === 'string' ? x.replace(/\s/g, '') : ''; }
+    var info = { grand: null, zaiko: false, labor: null, material: null, laborHead: null, materialHead: null, exp: null, items: {}, total: null };
+    var curH = null;
+    for (var r = TOP; r <= g.v.length; r++) {
+      var a = v(r, C.A), at = typeof a === 'string' ? a.trim() : '';
+      if (at && !isNumLike(at)) {
+        if (trimAll(at) === '経費') { info.exp = r; curH = null; continue; }
+        if (isBoundA(at)) { if (info.exp) break; curH = null; continue; }
+        curH = { r: r, key: headKey(at), num: (nfkc(at).match(/^\s*(\d+)\s*[.．]/) || [])[1] || null };
+        if (/労務費/.test(at)) { info.zaiko = true; info.laborHead = curH; }
+        if (/資材費/.test(at)) { info.zaiko = true; info.materialHead = curH; }
+        continue;
+      }
+      var lb = v(r, C.I);
+      if (isTotalLabel(lb) && /^=SUM\(/i.test(f(r))) {
+        var k = headKey(lb);
+        if (k === '工事費' && !info.grand) info.grand = r;
+        if (curH && (k === curH.key || (curH.num && k === curH.num))) {
+          if (info.laborHead === curH && !info.labor) info.labor = r;
+          if (info.materialHead === curH && !info.material) info.material = r;
+        }
+      }
+      if (trimAll(lb) === '合計' && !info.total) info.total = r;
+      if (info.exp && r > info.exp && !info.total) {
+        var c = v(r, C.C);
+        EXP_KEYS.forEach(function (key) { if (!info.items[key] && !isEmpty(c) && expMatch(key, c)) info.items[key] = r; });
+      }
+    }
+    return info;
+  };
+  // cfg = { transport:{on,label,k,l}, misc:{...}, welfare:{...} }, mode:'kyokai'|'zaiko', base: 工事金額の行（省略時は工事費計）, labor: 労務費の式
+  UA.expensePlan = function (g, cfg, opt) {
+    opt = opt || {};
+    var info = UA.expenseInfo(g), res = { ok: false, info: info };
+    var W = opt.base || info.grand;
+    if (!W) { res.message = '「工事費　計」の行が見つかりません。先に工事費計を入れてください'; return res; }
+    function v(r, c) { var row = g.v[r - 1]; var x = row ? row[c] : ''; return x == null ? '' : x; }
+    // K〜M列（手計算・メモ）に何か入っている行も使わない（上書きしないように）
+    function blankRow(r) { for (var c = 0; c <= 12; c++) if (c !== C.J && !isEmpty(v(r, c))) return false; return true; }
+    var zaiko = opt.mode ? opt.mode === 'zaiko' : info.zaiko;
+    var laborExpr = null, laborNote = '';
+    if (zaiko) {
+      if (opt.labor) { laborExpr = opt.labor; laborNote = '労務費＝' + opt.labor; }
+      else if (info.labor) { laborExpr = 'J' + info.labor; laborNote = '労務費＝J' + info.labor + '（労務費の計）'; }
+      else if (info.material) { laborExpr = '(J' + W + '-J' + info.material + ')'; laborNote = '労務費＝工事金額−資材費（J' + W + '−J' + info.material + '）'; }
+      else { laborExpr = 'J' + W; laborNote = '労務費の計が見つからないため、工事金額（J' + W + '）を使います'; res.warn = laborNote; }
+    }
+    var keys = EXP_KEYS.filter(function (k) { return cfg[k] && cfg[k].on; });
+    if (!keys.length) { res.message = '入れる経費の項目がありません'; return res; }
+    var rows = {}, ins = [], P = null, head = null;
+    if (info.exp && info.exp > W) {
+      // 「経費」の見出しがある：同じ項目の行は書き直し、無い項目は最後の項目の下に入れる
+      head = info.exp;
+      var last = head;
+      EXP_KEYS.forEach(function (k) { if (info.items[k]) last = Math.max(last, info.items[k]); });
+      var add = keys.filter(function (k) { return !info.items[k]; });
+      keys.forEach(function (k) { if (info.items[k]) rows[k] = info.items[k]; });
+      if (add.length) {
+        var free = 0; while (free < add.length && blankRow(last + 1 + free) && v(last + 1 + free, C.I) === '') free++;
+        // 空き行は使うが、合計の前の空き行1行は残す
+        var useFree = Math.max(0, Math.min(free, add.length) - (free >= add.length + 1 ? 0 : 1));
+        if (free >= add.length + 1) useFree = add.length;
+        var insN = add.length - useFree;
+        if (insN > 0) ins.push({ at: last + 1 + useFree, n: insN });
+        add.forEach(function (k, i) { rows[k] = last + 1 + i; });
+      }
+      res.mode = 'update';
+    } else {
+      // 工事費計の下に「空き行・経費・項目・空き行」を作る
+      P = W + 1;
+      var needN = 2 + keys.length + 1, b = 0;
+      while (b < needN && blankRow(P + b)) b++;
+      if (b < needN) ins.push({ at: P + b, n: needN - b });
+      head = P + 1;
+      keys.forEach(function (k, i) { rows[k] = head + 1 + i; });
+      res.mode = 'new';
+    }
+    var writes = [];
+    if (res.mode === 'new') writes.push({ r: head, col: 'A', v: '経費' });
+    keys.forEach(function (k) {
+      var r = rows[k], c = cfg[k], isNew = res.mode === 'new' || !info.items[k];
+      if (isNew) writes.push({ r: r, col: 'C', v: c.label });
+      writes.push({ r: r, col: 'G', v: 1 }, { r: r, col: 'H', v: '式' });
+      if (k === 'welfare') {
+        if (zaiko) {
+          writes.push({ r: r, col: 'K', v: '' }, { r: r, col: 'L', v: num(c.l) }, { r: r, col: 'M', v: '=ROUNDUP(' + laborExpr + '*L' + r + ',-1)' });
+        } else {
+          writes.push({ r: r, col: 'K', v: num(c.k) }, { r: r, col: 'L', v: num(c.l) }, { r: r, col: 'M', v: '=ROUNDUP(J' + W + '*K' + r + '*L' + r + ',-1)' });
+        }
+      } else {
+        writes.push({ r: r, col: 'K', v: num(c.k) }, { r: r, col: 'L', v: num(c.l) }, { r: r, col: 'M', v: '=ROUNDUP(J' + W + '*K' + r + ',L' + r + ')' });
+      }
+      writes.push({ r: r, col: 'J', v: '=M' + r });
+    });
+    res.ok = true; res.base = W; res.zaiko = zaiko; res.laborNote = laborNote; res.ins = ins; res.writes = writes; res.rows = rows; res.head = head;
+    res.select = Math.max.apply(null, keys.map(function (k) { return rows[k]; })) + 1;
+    return res;
+  };
+  // 経費の金額の見込み（画面の表示用）
+  UA.expenseEstimate = function (k, c, base, labor, zaiko) {
+    if (k === 'welfare') return zaiko ? roundVal(labor * num(c.l), 'up10') : roundVal(base * num(c.k) * num(c.l), 'up10');
+    var d = -num(c.l), p = Math.pow(10, d > 0 ? d : 0);
+    return Math.ceil(base * num(c.k) / p - 1e-9) * p;
+  };
+
+  /* ---------- 仕様の行を書き込む計画（入力フォーム） ----------
+     sel = { place, spec, cont（上の仕様の続きなら true を許す）, lines:[{d,e,f,g,h,i,iF,ref}]（角ダクト・BOX）, d（バルブの種類） }
+     戻り値 { ok, P, k, ins, insAt, specRow, inputRow, writeSpec, writePlace, rows:[{r, kind, ...}], ctx } */
+  UA.specWritePlan = function (sc, R, sel) {
+    var res = { ok: false };
+    if (!(R >= sc.startRow)) { res.message = sc.startRow + '行目より下の行を選んでください'; return res; }
+    var me = sc.rows[R];
+    var isBlank = !me || me.blank;
+    var P = isBlank ? R : R + 1;
+    var x = UA.ctxAt(sc, P);
+    if (x.after) { res.message = '「工事費　計」・経費・見積条件より上の行を選んでください'; return res; }
+    var prev = sc.rows[P - 1];
+    var inBlock = prev && (prev.kind === 'line' || prev.kind === 'spec' || prev.kind === 'dhead' || prev.kind === 'other') && prev.blockId === x.blockId;
+    var same = x.spec && sel.spec && x.spec === normSpec(sel.spec) && trimAll(x.place) === trimAll(sel.place);
+    var writeSpec = !(same && inBlock);
+    var writePlace = writeSpec && !(x.placeSys && trimAll(x.placeSys) === trimAll(sel.place));
+    var nLines = sel.lines && sel.lines.length ? sel.lines.length : 1;
+    var k = (writeSpec ? 1 : 0) + nLines, b = 0;
+    while (b < k && (!sc.rows[P + b] || sc.rows[P + b].blank)) b++;
+    res.ok = true; res.P = P; res.k = k; res.ins = k - b; res.insAt = P + b; res.ctx = x; res.same = same; res.inBlock = !!inBlock;
+    res.writeSpec = writeSpec; res.writePlace = writePlace;
+    res.specRow = writeSpec ? P : null;
+    res.inputRow = P + (writeSpec ? 1 : 0);
+    res.select = sel.lines && sel.lines.length ? res.inputRow + nLines : res.inputRow;
+    return res;
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = UA;
