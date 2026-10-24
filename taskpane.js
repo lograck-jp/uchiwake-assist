@@ -10,7 +10,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.10';
+  var VERSION = '2.0.11';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -268,8 +268,15 @@
   }
 
   /* ---------- 自動入力・選択行に単価 ---------- */
+  // 入力フォームで書いた BOX の行（E列に辺を出していない）：AA列の3辺と H=台 で見分ける
+  function formBox(o, aa) {
+    if (!o || !U.isEmpty(o.E) || String(o.H).trim() !== '台' || typeof aa !== 'string') return null;
+    var m = aa.match(/^\s*([^（(]+)/), b = m ? UA.parseSize(m[1].trim()) : null;
+    return b && b.box ? b : null;
+  }
   function guessFor(sc, r, aa) {
     var o = sc.rows[r];
+    if (o && o.kind !== 'line' && formBox(o, aa)) o = Object.assign({}, o, { kind: 'line', item: 'box', sz: formBox(o, aa) });
     if (!o || o.kind !== 'line') return { skip: '明細の行ではありません' };
     var x = UA.ctxAt(sc, r, o.D);
     if (!x.spec) return { skip: '上に仕様の行（括弧書き）がありません' };
@@ -314,8 +321,8 @@
             var o = sc.rows[r], yNow = refVal(r, 0), owned = UA.isAutoRef(yNow);
             var fv = rg.formulas[r - 1] || [];
             // サイズを消した行：自動で入れた単価・参照元を消す
-            if (mode === 'auto' && (!o || o.kind !== 'line')) {
-              if (o && U.isEmpty(o.E) && owned) {
+            if (mode === 'auto' && (!o || (o.kind !== 'line' && !formBox(o, refVal(r, rk.indexOf('aa')))))) {
+              if (o && U.isEmpty(o.E) && owned && !formBox(o, refVal(r, rk.indexOf('aa')))) {
                 var memo = st.auto.memo && st.auto.memo[r];
                 if (!U.isEmpty(fv[8])) put('I' + r, '', fv[8]);
                 rk.forEach(function (k, i) { put(rc[k] + r, '', refPrev(r, i)); });
@@ -586,7 +593,7 @@
         var area = UA.boxArea(sz.box, five);
         // AA列には3辺と面積を残す（E列に一部の辺しか出さなくても、単価を入れ直せるように）
         if (p.ref) p.ref = Object.assign({}, p.ref, { aa: sz.text + '（' + area + '㎡・' + (five ? '5面' : '6面') + '）' });
-        out.lines.push({ d: '', e: boxText(b, bx) || sz.text, f: fb, g: n, h: '台', pr: p, area: area });
+        out.lines.push({ d: '', e: (bx.show.w || bx.show.h || bx.show.l) ? (boxText(b, bx) || sz.text) : '', f: fb, g: n, h: '台', pr: p, area: area });
       });
       if (out.lines.length === (out.head ? 1 : 0)) out.lines = [];
     }
@@ -1230,7 +1237,7 @@
         case 'bName': w.box.name = v; w.box.five = null; break;
         case 'bFive': w.box.five = v === '1'; break;
         case 'bF': w.box.f = v; w.box.fx = ''; break;
-        case 'bShow': w.box.show[v] = !w.box.show[v]; if (!w.box.show.w && !w.box.show.h && !w.box.show.l) { w.box.show[v] = true; toast('少なくとも1つの辺は E列に出します', 'info'); } saveBoxUi(); break;
+        case 'bShow': w.box.show[v] = !w.box.show[v]; saveBoxUi(); break;
         case 'bSym': w.box.sym = !w.box.sym; saveBoxUi(); break;
         case 'bAdd': w.box.boxes.push({ w: '', h: '', l: '', n: '1' }); break;
         case 'bDel': w.box.boxes.splice(+v, 1); if (!w.box.boxes.length) w.box.boxes = [{ w: '', h: '', l: '', n: '1' }]; break;
