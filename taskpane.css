@@ -369,3 +369,8 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .cnd-t .tg { font-style: normal; margin-left: 5px; font-size: 9.5px; padding: 0 5px; border-radius: 4px; background: var(--wool-soft); color: var(--wool); white-space: nowrap; }
 .cnd-a { display: flex; flex-shrink: 0; }
 .cnd-tools { justify-content: flex-end; }
+
+/* BOX の寸法の並び */
+.bord .ords { display: flex; align-items: center; gap: 3px; flex: 1; min-width: 0; color: var(--muted); }
+.in.ord { width: auto; flex: 1; min-width: 0; height: 28px; padding: 0 4px; font: 700 12px var(--ui); text-align: center; text-align-last: center; -webkit-appearance: none; appearance: none; cursor: pointer; }
+.in.ord:hover { border-color: var(--wool-line); }

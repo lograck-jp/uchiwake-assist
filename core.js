@@ -1382,26 +1382,60 @@
   UA.headKey = headKey;
 
   /* ---------- サイズの書き方 ---------- */
-  // 50 / 50A / 20Su / 30VP / φ200 / 200φ / 矩形 / 500×300 / 1000×3300×1500（W×D×H。W・D・H の文字があればそれを優先）
+  // BOX・チャンバーの3辺：W＝幅、H＝高さ、D・L＝奥行（長さ）。記号は数字の前でも後ろでもよく、並びも自由（W500×D300×H400、1500×500×1200H、H400W600L300 など）。
+  // 記号の無い辺は、BOX_ORDER（パネルの「寸法の並び」）の位置で決める。既定は W×H×L（入力フォームの初めの並び）
+  var BOX_ORDER = ['W', 'H', 'L'];
+  function boxRole(k) { k = String(k || '').toUpperCase(); return k === 'W' ? 'w' : k === 'H' ? 'h' : (k === 'D' || k === 'L') ? 'd' : ''; }
+  UA.boxRole = boxRole;
+  // 並びとして使えるか（W・H と、D か L のどちらか1つ）
+  UA.boxOrderOK = function (o) {
+    if (!o || o.length !== 3) return false;
+    var r = o.map(boxRole);
+    return r.indexOf('w') >= 0 && r.indexOf('h') >= 0 && r.indexOf('d') >= 0;
+  };
+  UA.setBoxOrder = function (o) { if (UA.boxOrderOK(o)) BOX_ORDER = o.map(function (x) { return String(x).toUpperCase(); }); return BOX_ORDER.slice(); };
+  UA.getBoxOrder = function () { return BOX_ORDER.slice(); };
+  function depthLetter() { for (var i = 0; i < BOX_ORDER.length; i++) if (boxRole(BOX_ORDER[i]) === 'd') return BOX_ORDER[i]; return 'L'; }
+  // 50 / 50A / 20Su / 30VP / φ200 / 200φ / 矩形 / 500×300 / BOX の3辺（上の説明）。3辺の前に名前があってもよい（SAダクト　400×1000×450）
   UA.parseSize = function (e) {
     if (typeof e === 'number') return isFinite(e) && e > 0 ? { n: e, ser: '', text: String(e) } : null;
     var t = nfkc(e).replace(/\s+/g, '');
     if (!t) return null;
     if (t === '矩形') return { rect: true, text: '矩形' };
-    var u = t.replace(/[xX＊*✕]/g, '×');
+    // 「x」「*」は数字（と記号・mm）のあいだだけ × とみなす（名前の「BOX」の X を区切りにしないように）
+    var u = t.replace(/([\dWDHLwdhlm])[xX＊*✕](?=[WDHLwdhl]?\d)/g, '$1×');
     var parts = u.split('×');
+    if (parts.length === 3) {
+      // 前に付いた名前（SAダクト・OA BOX・EA2 BOX など）は外す
+      var pre = parts[0].match(/^(.*?)([WDHLwdhl]?\d+(?:\.\d+)?(?:mm|MM)?[WDHLwdhl]?)$/);
+      if (pre && pre[1] && /[^\d.]$/.test(pre[1])) { parts[0] = pre[2]; u = parts.join('×'); }
+    }
     if (parts.length === 3 || parts.length === 2) {
       var dims = [], ok = true;
       parts.forEach(function (p, i) {
-        var mm = p.match(/^([WDHLwdhl]?)(\d+(?:\.\d+)?)([WDHLwdhl]?)$/);
-        if (!mm) { ok = false; return; }
-        dims.push({ v: +mm[2], k: (mm[1] || mm[3] || '').toUpperCase().replace('L', 'D'), i: i });
+        var mm = p.match(/^([WDHLwdhl]?)(\d+(?:\.\d+)?)(?:mm|MM)?([WDHLwdhl]?)$/);
+        if (!mm || (mm[1] && mm[3])) { ok = false; return; }
+        var k = (mm[1] || mm[3] || '').toUpperCase();
+        dims.push({ v: +mm[2], k: k, role: boxRole(k), i: i });
       });
       if (ok && parts.length === 3) {
-        var o = {}, order = ['W', 'D', 'H'];
-        dims.forEach(function (d) { if (d.k && o[d.k] == null) o[d.k] = d.v; else if (d.k) d.k = ''; });
-        dims.forEach(function (d) { if (d.k) return; var k = order.filter(function (x) { return o[x] == null; })[0]; if (k) o[k] = d.v; });
-        if (o.W > 0 && o.D > 0 && o.H > 0) return { box: { w: o.W, d: o.D, h: o.H }, text: u };
+        var o = {}, lab = 0;
+        // 記号のある辺（同じ辺が2回なら、2回目は記号なしとして扱う）
+        dims.forEach(function (d) { if (d.role && o[d.role] == null) { o[d.role] = d.v; lab++; } else { d.role = ''; d.k = ''; } });
+        // 記号の無い辺：並びの同じ位置の辺 → 空いている辺を並びの順に
+        dims.forEach(function (d) {
+          if (d.role) return;
+          var want = boxRole(BOX_ORDER[d.i]);
+          if (want && o[want] == null) d.role = want;
+          else d.role = BOX_ORDER.map(boxRole).filter(function (x) { return o[x] == null; })[0] || '';
+          if (d.role) o[d.role] = d.v;
+        });
+        if (o.w > 0 && o.d > 0 && o.h > 0) {
+          var keys = dims.map(function (d) { return d.k || (d.role === 'w' ? 'W' : d.role === 'h' ? 'H' : depthLetter()); });
+          return { box: { w: o.w, d: o.d, h: o.h }, text: u, vals: dims.map(function (d) { return d.v; }), keys: keys, lab: lab,
+            label: dims.map(function (d, i) { return keys[i] + d.v; }).join('×') };
+        }
+        return null;
       }
       if (ok && parts.length === 2) return { wh: [dims[0].v, dims[1].v], text: u };
       return null;
@@ -1413,9 +1447,21 @@
     var ser = m[1] || s === 'Φ' || s === 'Ф' || m[3] === 'φ' ? 'φ' : s === 'A' ? 'A' : s === 'SU' ? 'Su' : s === 'VP' ? 'VP' : '';
     return { n: n, ser: ser, text: u };
   };
+  // AA列（参照したサイズ）に残した BOX の3辺を使うか。E列が空・E列の数字が AA列の数字の一部（入力フォームで辺を省いた）・
+  // E列が記号なしで AA列と同じ数字の並び のときは AA列。E列に記号付きで3辺がある、または数字が違う（E列を打ち直した）ときは E列
+  UA.boxRefFits = function (e, ab) {
+    if (!ab || !ab.box) return false;
+    if (isEmpty(e)) return true;
+    var es = UA.parseSize(e);
+    if (es && es.box && es.lab > 0) return false;
+    var nums = (nfkc(String(e)).replace(/\s+/g, '').match(/\d+(?:\.\d+)?/g) || []).map(Number), vals = ab.vals || [ab.box.w, ab.box.h, ab.box.d];
+    if (es && es.box) return nums.length === vals.length && nums.every(function (x, i) { return x === vals[i]; });
+    var j = 0; for (var i = 0; i < vals.length && j < nums.length; i++) if (vals[i] === nums[j]) j++;
+    return nums.length > 0 && j === nums.length;
+  };
   // VP（硬質塩ビ管）の呼び → 単価に使う鋼管の呼び径（A）。30VP は 32A、ほかは同じ数字
   UA.VP_TO_A = { 30: 32 };
-  // BOX・チャンバーの表面積。W×D×H（D＝奥行・長さ L）で 6面＝2(WH+WD+HD)、5面＝(WH+2WD+2HD)（W×H の面が1面だけ）
+  // BOX・チャンバーの表面積。W×H×D（D＝奥行・長さ L）で 6面＝2(WH+WD+HD)、5面＝(WH+2WD+2HD)（W×H の面が1面だけ）
   //   k＝面積の割増（設定マスタ M_出力設定「BOXの面積の割増」）
   UA.boxArea = function (b, five, k) {
     var w = b.w / 1000, d = b.d / 1000, h = b.h / 1000, kk = k > 0 ? k : 1;
@@ -1739,7 +1785,7 @@
       formula = '=ROUNDUP(' + ex + '*' + area + ',-1)';
       p = roundVal(p * area, 'up10');
       ref.y += ' ×面積' + area + '㎡（' + (five ? '5面' : '6面') + '×' + bk + '）';
-      ref.aa = sz.text + '（' + area + '㎡・' + (five ? '5面' : '6面') + '）';
+      ref.aa = (sz.label || sz.text) + '（' + area + '㎡・' + (five ? '5面' : '6面') + '）';
     } else if (q.item === 'rect' && sz.wh) ref.aa = '（㎡単価）' + sz.text;
     return { p: p, formula: formula, ref: ref, via: 'sk', approx: r.approx, id: r.id };
     function noPrice(why) { return { p: null, why: why, ref: { y: '単価なし：' + why, z: '', aa: boxRefAA(q, sz, m) || sizeLabel(q.item, sz), ab: q.f ? q.f + 'mm' : '' } }; }
@@ -1749,7 +1795,7 @@
   function boxRefAA(q, sz, m) {
     if (q.item !== 'box' || !sz || !sz.box) return null;
     var five = q.five != null ? !!q.five : UA.isFiveSided(q.d || '');
-    return sz.text + '（' + UA.boxArea(sz.box, five, m && m.output && m.output.boxFactor) + '㎡・' + (five ? '5面' : '6面') + '）';
+    return (sz.label || sz.text) + '（' + UA.boxArea(sz.box, five, m && m.output && m.output.boxFactor) + '㎡・' + (five ? '5面' : '6面') + '）';
   }
   function ruleLine(sk, m, rules, q, help, depth, rule) {
     var baseItem = rule.base === 'kind' ? q.item : (q.item === 'round' || q.item === 'rect' || q.item === 'box' ? 'round' : 'pipe');
