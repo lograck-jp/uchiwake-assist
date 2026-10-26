@@ -1382,7 +1382,7 @@
   UA.headKey = headKey;
 
   /* ---------- サイズの書き方 ---------- */
-  // BOX・チャンバーの3辺：W＝幅、H＝高さ、D・L＝奥行（長さ）。記号は数字の前でも後ろでもよく、並びも自由（W500×D300×H400、1500×500×1200H、H400W600L300 など）。
+  // BOX・チャンバーの3辺：W＝幅、H＝高さ、D・L＝奥行（長さ）。記号は数字の前でも後ろでもよく、並びも自由（W500×D300×H400、1500×500×1200H、400H×600W×300L など）。
   // 記号の無い辺は、BOX_ORDER（パネルの「寸法の並び」）の位置で決める。既定は W×H×L（入力フォームの初めの並び）
   var BOX_ORDER = ['W', 'H', 'L'];
   function boxRole(k) { k = String(k || '').toUpperCase(); return k === 'W' ? 'w' : k === 'H' ? 'h' : (k === 'D' || k === 'L') ? 'd' : ''; }
@@ -1433,7 +1433,7 @@
         if (o.w > 0 && o.d > 0 && o.h > 0) {
           var keys = dims.map(function (d) { return d.k || (d.role === 'w' ? 'W' : d.role === 'h' ? 'H' : depthLetter()); });
           return { box: { w: o.w, d: o.d, h: o.h }, text: u, vals: dims.map(function (d) { return d.v; }), keys: keys, lab: lab,
-            label: dims.map(function (d, i) { return keys[i] + d.v; }).join('×') };
+            given: dims.map(function (d) { return d.k; }), label: dims.map(function (d, i) { return d.v + keys[i]; }).join('×') };
         }
         return null;
       }
@@ -1447,15 +1447,19 @@
     var ser = m[1] || s === 'Φ' || s === 'Ф' || m[3] === 'φ' ? 'φ' : s === 'A' ? 'A' : s === 'SU' ? 'Su' : s === 'VP' ? 'VP' : '';
     return { n: n, ser: ser, text: u };
   };
-  // AA列（参照したサイズ）に残した BOX の3辺を使うか。E列が空・E列の数字が AA列の数字の一部（入力フォームで辺を省いた）・
-  // E列が記号なしで AA列と同じ数字の並び のときは AA列。E列に記号付きで3辺がある、または数字が違う（E列を打ち直した）ときは E列
+  // AA列（参照したサイズ）に残した BOX の3辺を使うか。E列が空・E列の数字が AA列の数字の一部（前の版で辺を省いた）・
+  // E列が AA列と同じ数字の並びで、E列に付いている記号が AA列と同じ辺 のときは AA列（並びの設定を変えても読み方が変わらない）。
+  // 数字が違う（E列を打ち直した）、記号の辺が違う ときは E列
   UA.boxRefFits = function (e, ab) {
     if (!ab || !ab.box) return false;
     if (isEmpty(e)) return true;
     var es = UA.parseSize(e);
-    if (es && es.box && es.lab > 0) return false;
     var nums = (nfkc(String(e)).replace(/\s+/g, '').match(/\d+(?:\.\d+)?/g) || []).map(Number), vals = ab.vals || [ab.box.w, ab.box.h, ab.box.d];
-    if (es && es.box) return nums.length === vals.length && nums.every(function (x, i) { return x === vals[i]; });
+    if (es && es.box) {
+      if (!(nums.length === vals.length && nums.every(function (x, i) { return x === vals[i]; }))) return false;
+      var ak = ab.keys || [];
+      return (es.given || []).every(function (k, i) { return !k || boxRole(k) === boxRole(ak[i]); });
+    }
     var j = 0; for (var i = 0; i < vals.length && j < nums.length; i++) if (vals[i] === nums[j]) j++;
     return nums.length > 0 && j === nums.length;
   };

@@ -11,7 +11,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.15';
+  var VERSION = '2.0.16';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -34,7 +34,7 @@
   function freshWiz() {
     return { open: 'item', item: '', place: '', spec: '', cont: false, d: '', done: null, insN: '',
       rect: { sub: '', t16: false, f: '', fx: '', rq: '' },
-      box: { name: '', five: null, f: '', fx: '', show: { w: true, h: true, l: true }, sym: false, order: ['W', 'H', 'L'], boxes: [{ w: '', h: '', l: '', n: '1' }] } };
+      box: { name: '', five: null, f: '', fx: '', lab: { w: false, h: false, l: false }, order: ['W', 'H', 'L'], boxes: [{ w: '', h: '', l: '', n: '1' }] } };
   }
 
   /* ---------- 保存（このパソコンの中） ---------- */
@@ -58,7 +58,7 @@
     st.autoOpen = docGet('Office.AutoShowTaskpaneWithDocument') === true;
     var raw = load(K_MASTER); if (raw && raw.master) setMaster(raw.master, raw.info, false);
     var sl = load(K_SPECS); if (sl && sl.add) st.specLocal = { add: sl.add || [], hide: sl.hide || {}, pin: sl.pin || {}, order: sl.order || {} };
-    var bu = load(K_BOX); if (bu && bu.show) { st.wiz.box.show = bu.show; st.wiz.box.sym = !!bu.sym; }
+    var bu = load(K_BOX); if (bu && bu.lab) st.wiz.box.lab = { w: !!bu.lab.w, h: !!bu.lab.h, l: !!bu.lab.l };
     if (bu && UA.boxOrderOK(bu.order)) st.wiz.box.order = bu.order;
     UA.setBoxOrder(st.wiz.box.order);   // 記号なしで打った BOX の寸法も、この並びで読む
     st.siteType = docGet('uchiwake.siteType') || '';
@@ -581,10 +581,11 @@
   // 角ダクト・BOX の保温厚：ボタン（25・50）か、操作者が入れた厚み
   function ductThick(o, guess) { return U.thickKey(o.fx) || o.f || guess || '25'; }
   // BOX の寸法の書き方（E列）：出す辺だけ、記号付き／なし
-  // E列に書く寸法：「寸法の並び」の順に、出す辺だけ（記号を付けるかは「記号」ボタン）
+  // E列に書く寸法：「寸法の並び」の順に3辺とも。記号（W・H・D・L）は「記号を付ける」を押した辺だけ、数字の後に付ける（600×400×500H）
+  //   all＝すべての辺に記号（AA列・単価の計算用）
   function boxText(b, bx, all) {
     var parts = [];
-    bx.order.forEach(function (L) { var key = ROLE_KEY[UA.boxRole(L)]; if ((all || bx.show[key]) && U.num(b[key]) > 0) parts.push((all || bx.sym ? L : '') + U.num(b[key])); });
+    bx.order.forEach(function (L) { var key = ROLE_KEY[UA.boxRole(L)]; if (U.num(b[key]) > 0) parts.push(U.num(b[key]) + (all || bx.lab[key] ? L : '')); });
     return parts.join('×');
   }
   // 角ダクト・BOX：書き込む明細
@@ -618,7 +619,7 @@
         var area = UA.boxArea(sz.box, five, st.master.output && st.master.output.boxFactor);
         // AA列には3辺と面積を残す（E列に一部の辺しか出さなくても、単価を入れ直せるように）
         if (p.ref) p.ref = Object.assign({}, p.ref, { aa: (sz.label || sz.text) + '（' + area + '㎡・' + (five ? '5面' : '6面') + '）' });
-        out.lines.push({ d: '', e: (bx.show.w || bx.show.h || bx.show.l) ? (boxText(b, bx) || sz.text) : '', f: fb, g: n, h: '台', pr: p, area: area });
+        out.lines.push({ d: '', e: boxText(b, bx), f: fb, g: n, h: '台', pr: p, area: area });
       });
       if (out.lines.length === (out.head ? 1 : 0)) out.lines = [];
     }
@@ -995,7 +996,7 @@
   }
   function extraSumRect() { var ex = extraLines(), r = st.wiz.rect; return esc((r.sub ? r.sub + (r.t16 ? '(1.6t)' : '') + '　' : '') + (ex.g > 0 ? U.fmtQ(ex.g) + '㎡　' : '') + 't' + (ex.f || '')); }
   function extraSumBox() { var ex = extraLines(), n = ex.lines.filter(function (l) { return !l.head; }).length; return esc((st.wiz.box.name || '名前なし') + '　' + (n ? n + '件' : '寸法未入力') + '　t' + (ex.f || '')); }
-  function sideBtn(k, label) { var on = st.wiz.box.show[k]; return '<button type="button" class="sbtn' + (on ? ' on' : '') + '" data-act="bShow" data-v="' + k + '" aria-pressed="' + on + '" title="' + label + 'を E列に' + (on ? '出す' : '出さない') + '">' + label + '</button>'; }
+  function labBtn(k, label) { var on = !!st.wiz.box.lab[k]; return '<button type="button" class="sbtn lab' + (on ? ' on' : '') + '" data-act="bLab" data-v="' + k + '" aria-pressed="' + on + '" title="' + LETTER_NAME[label] + 'の数字の後に「' + label + '」を' + (on ? '付ける' : '付けない') + '">' + label + '</button>'; }
   function extraBody() {
     var w = st.wiz, h = '';
     if (w.item === 'valve' || w.item === 'flange') {
@@ -1036,13 +1037,13 @@
           '<button type="button" class="x" data-act="bDel" data-v="' + i + '" aria-label="この行を消す">×</button>' +
           (l ? '<div class="bres"><b>E列：' + esc(l.e) + '</b>　' + l.area + '㎡　' + priceCap(l.pr) + '</div>' : '') + '</div>';
       }).join('') + '<button type="button" class="ghost sm" data-act="bAdd">＋寸法を追加</button></div>';
-      var exT = boxText({ w: 600, h: 500, l: 400 }, bx, true);
-      h += '<div class="kv"><span>E列に出す辺</span><div class="sides">' + bx.order.map(function (L) { return sideBtn(ROLE_KEY[UA.boxRole(L)], L); }).join('') +
-        '<button type="button" class="sbtn sym' + (bx.sym ? ' on' : '') + '" data-act="bSym" aria-pressed="' + bx.sym + '" title="' + esc(exT) + ' のように記号を付けます">記号</button></div></div>';
+      var exT = boxText({ w: 600, h: 500, l: 400 }, bx, true), exE = boxText({ w: 600, h: 500, l: 400 }, bx);
+      h += '<div class="kv"><span>記号を付ける</span><div class="sides">' + bx.order.map(function (L) { return labBtn(ROLE_KEY[UA.boxRole(L)], L); }).join('') +
+        '</div><span class="hint">E列：' + esc(exE) + '</span></div>';
       h += '<div class="kv"><span>面の数</span><div class="segs">' + [[false, '6面'], [true, '5面']].map(function (x) {
         return '<button type="button" class="seg' + (ex.five === x[0] ? ' on' : '') + '" data-act="bFive" data-v="' + (x[0] ? '1' : '0') + '">' + x[1] + '</button>'; }).join('') + '</div><span class="hint">面積×' + esc(String((st.master.output && st.master.output.boxFactor) || '（設定マスタ）')) + '。チャンバー・ガラリは5面</span></div>';
       h += ductThickChips(bx, 'bF', 'bFx');
-      h += '<div class="hint">単価は3辺すべてから計算します（E列に出さない辺も使います。5面は W×H の面が開いている面）。' +
+      h += '<div class="hint">E列には3辺とも書きます。記号は押した辺だけ数字の後に付けます。5面は W×H の面が開いている面です。' +
         'Excel に記号なしで打った寸法もこの並びで読みます（600×500×400 → ' + esc(exT) + '）。記号付き（1500×500×1200H など）は並びに関係なく記号で読みます</div>';
       return h;
     }
@@ -1329,7 +1330,7 @@
       });
     } catch (e) { toast(msg(e), 'err'); render(); }
   }
-  function saveBoxUi() { save(K_BOX, { show: st.wiz.box.show, sym: st.wiz.box.sym, order: st.wiz.box.order }); }
+  function saveBoxUi() { save(K_BOX, { lab: st.wiz.box.lab, order: st.wiz.box.order }); }
   // 寸法の並び：i 番目の記号を k にする。同じ辺（W・H・奥行）がほかの位置にあれば、そこを元の記号と入れ替える
   function setBoxOrderAt(i, k) {
     var o = st.wiz.box.order.slice(), old = o[i], r = UA.boxRole(k);
@@ -1404,8 +1405,7 @@
         case 'bName': w.box.name = v; w.box.five = null; break;
         case 'bFive': w.box.five = v === '1'; break;
         case 'bF': w.box.f = v; w.box.fx = ''; break;
-        case 'bShow': w.box.show[v] = !w.box.show[v]; saveBoxUi(); break;
-        case 'bSym': w.box.sym = !w.box.sym; saveBoxUi(); break;
+        case 'bLab': w.box.lab[v] = !w.box.lab[v]; saveBoxUi(); break;
         case 'bAdd': w.box.boxes.push({ w: '', h: '', l: '', n: '1' }); break;
         case 'bDel': w.box.boxes.splice(+v, 1); if (!w.box.boxes.length) w.box.boxes = [{ w: '', h: '', l: '', n: '1' }]; break;
         case 'insN': { var pn = wizPlan(), cur = U.num(w.insN) || (pn ? pn.ins : 0); w.insN = String(Math.max(pn ? pn.minIns : 1, cur + (+v))); break; }
