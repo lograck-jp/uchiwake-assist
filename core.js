@@ -720,8 +720,10 @@
       var adj = (m && m.skAdj && m.skAdj.length) ? m.skAdj : (UA._skAdj || (UA._skAdj = UA.compileSkAdj(UA.skDefaultAdj())));
       var specRaw = nk(String(q.spec).replace(/ヒーター[＋+]/g, 'ヒーター　'));
       adj.forEach(function (a) {
-        var tgt = a.target === 'サイズ' ? nk(q.size) : a.target === '種別' ? nk(q.d) : specRaw;
-        if (tgt.indexOf(a.word) < 0) return;
+        // 対象：仕様・サイズ・種別（D列）・品目（品目ID か M_品目 の表示名。大文字小文字は区別しない。例 box＝BOX・チャンバー・ガラリ）
+        var isItem = a.target === '品目';
+        var tgt = a.target === 'サイズ' ? nk(q.size) : a.target === '種別' ? nk(q.d) : isItem ? nk(q.item + '／' + itemLabel(m, q.item)).toUpperCase() : specRaw;
+        if (tgt.indexOf(isItem ? a.word.toUpperCase() : a.word) < 0) return;
         if (a.factor !== 1) { factor *= a.factor; notes.push('×' + a.factor + '（' + a.word + '）'); }
         if (a.plus) { plus += a.plus; notes.push('＋' + yen(a.plus) + '円（' + a.word + '）'); }
       });
@@ -1765,7 +1767,7 @@
     if (!sk) return noPrice('保温積算資料が未読込');
     var look = sz.n, conv = '', size;
     if (q.item === 'rect') size = '矩形';
-    else if (q.item === 'box') size = sz.box ? sz.text : 'BOX';   // 寸法で書いた BOX はサイズ「BOX」の加算（M_単価加算）を足さない（VBA と同じ）
+    else if (q.item === 'box') size = sz.box ? sz.text : 'BOX';   // BOX の加算は M_単価加算 の「品目 box」で足す（寸法で書いた BOX も。加算してから㎡をかける）
     else {
       if (sz.ser === 'Su' || (q.item === 'pipe' && /^SUS$/i.test(String(q.d || '').trim()))) {
         var su = (m && m.sizes && m.sizes.Su || []).filter(function (z) { return z.n === sz.n; })[0];
