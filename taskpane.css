@@ -377,3 +377,4 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .sbtn.lab { text-decoration: none; }
 .sbtn.lab:not(.on) { color: var(--faint); }
 .sides + .hint { font-family: var(--fig); color: var(--sub); }
+.wr.gap .wt { color: #8A939C; font-size: 11px; }

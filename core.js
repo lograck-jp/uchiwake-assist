@@ -2334,7 +2334,10 @@
     var writeSpec = !(same && inBlock);
     var writePlace = writeSpec && !(x.placeSys && trimAll(x.placeSys) === trimAll(sel.place));
     var nLines = sel.lines && sel.lines.length ? sel.lines.length : 1;
-    var k = (writeSpec ? 1 : 0) + nLines;
+    // 前の塊（明細・エルボ・計など）のすぐ下に新しい仕様の行を書くときは、空き行を1行あける（見積書の書き方：塊のあいだは空き行。
+    // 見出し〔大項目・系統〕のすぐ下はあけない）。v2.0.18
+    var gap = writeSpec && prev && !prev.blank && /^(line|spec|dhead|other|total)$/.test(prev.kind) ? 1 : 0;
+    var k = gap + (writeSpec ? 1 : 0) + nLines;
     // 書く行（少なくとも選んだ行と次の行）にデータがあれば、選んだ行に行を挿入して書く
     var busy = [];
     for (var i = 0; i < Math.max(2, k); i++) { var o = sc.rows[P + i]; if (o && !o.blank) busy.push(P + i); }
@@ -2342,9 +2345,9 @@
     var n = need ? Math.max(k, Math.floor(num(sel.insN)) || k) : 0;
     res.ok = true; res.P = P; res.k = k; res.ins = n; res.insAt = P; res.needIns = need; res.busy = busy; res.minIns = k;
     res.ctx = x; res.same = same; res.inBlock = !!inBlock;
-    res.writeSpec = writeSpec; res.writePlace = writePlace;
-    res.specRow = writeSpec ? P : null;
-    res.inputRow = P + (writeSpec ? 1 : 0);
+    res.writeSpec = writeSpec; res.writePlace = writePlace; res.gap = gap;
+    res.specRow = writeSpec ? P + gap : null;
+    res.inputRow = P + gap + (writeSpec ? 1 : 0);
     res.select = sel.lines && sel.lines.length ? res.inputRow + nLines : res.inputRow;
     return res;
   };

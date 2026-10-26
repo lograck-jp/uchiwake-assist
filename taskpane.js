@@ -11,7 +11,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.17';
+  var VERSION = '2.0.18';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -629,7 +629,7 @@
     if (!p) { toast(!targetRow() ? '内訳シートで書き込みたい行を選んでください' : '仕様を選んでください', 'warn'); render(); return; }
     if (!p.ok) { toast(p.message, 'warn'); render(); return; }
     if (w.item === 'box' && !ex.lines.length) { toast('BOX の寸法（' + w.box.order.join('・') + '）を入れてください', 'warn'); render(); return; }
-    var writes = [], rc = refColsOf(), rk = ['y', 'z', 'aa', 'ab'].filter(function (k) { return rc[k]; }), r = p.P;
+    var writes = [], rc = refColsOf(), rk = ['y', 'z', 'aa', 'ab'].filter(function (k) { return rc[k]; }), r = p.P + (p.gap || 0);
     if (p.writeSpec) {
       writes.push({ r: r, col: 'C', v: p.writePlace ? '(' + w.place + ')' : '' });
       writes.push({ r: r, col: 'E', v: '(' + U.normSpec(w.spec) + ')', align: 'Left' });
@@ -654,11 +654,11 @@
     }
     // 角ダクトで数量（㎡）が空なら G列を選ぶ。BOX は次の行
     var sel = w.item === 'rect' && !(U.num(w.rect.rq) > 0) ? 'G' + first : ex.lines.length ? 'D' + r : 'E' + p.inputRow;
-    var t = (p.ins ? p.ins + '行挿入して、' : '') + (p.writeSpec ? p.P + '行目に仕様の行を書きました。' : '');
+    var t = (p.ins ? p.ins + '行挿入して、' : '') + (p.gap ? p.P + '行目を空き行にして、' : '') + (p.writeSpec ? p.specRow + '行目に仕様の行を書きました。' : '');
     t += ex.lines.length ? first + (r - 1 > first ? '〜' + (r - 1) : '') + '行目に明細を書きました' + (w.item === 'rect' && !(U.num(w.rect.rq) > 0) ? '。数量（㎡）は G' + first + ' に入れてください' : '') : 'E' + p.inputRow + ' からサイズを打つと、保温厚・単位・単価が自動で入ります';
     applyPlan({ ins: p.ins ? { at: p.insAt, n: p.ins } : null, writes: writes, select: sel }, t).then(function (ok) {
       if (!ok) return;
-      w.done = { row: p.P, input: p.inputRow, spec: p.writeSpec, lines: ex.lines.length };
+      w.done = { row: p.specRow || p.P, input: p.inputRow, spec: p.writeSpec, lines: ex.lines.length };
       w.insN = '';
       if (w.item === 'rect') w.rect.rq = '';
       if (w.item === 'box') w.box.boxes = [{ w: '', h: '', l: '', n: '1' }];
@@ -1062,6 +1062,7 @@
     }
     h += '<div class="wrs">';
     var r = p.P;
+    if (p.gap) { h += '<div class="wr gap"><span class="rn">' + r + '</span><span class="wt">（空き行：前の塊とのあいだ）</span></div>'; r++; }
     if (p.writeSpec) { h += '<div class="wr"><span class="rn">' + r + '</span><span class="wt">' + (p.writePlace ? '<i>(' + esc(w.place) + ')</i>' : '') + '(' + esc(U.normSpec(w.spec)) + ')</span></div>'; r++; }
     if (ex.lines.length) ex.lines.forEach(function (l) {
       if (l.head) { h += '<div class="wr ln"><span class="rn">' + r + '</span><span class="wt"><i class="dcol">D列</i>' + esc(l.d) + '</span></div>'; r++; return; }
