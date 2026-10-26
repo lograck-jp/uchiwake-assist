@@ -11,7 +11,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.18';
+  var VERSION = '2.0.19';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -1036,14 +1036,12 @@
           '<button type="button" class="x" data-act="bDel" data-v="' + i + '" aria-label="この行を消す">×</button>' +
           (l ? '<div class="bres"><b>E列：' + esc(l.e) + '</b>　' + l.area + '㎡　' + priceCap(l.pr) + '</div>' : '') + '</div>';
       }).join('') + '<button type="button" class="ghost sm" data-act="bAdd">＋寸法を追加</button></div>';
-      var exT = boxText({ w: 600, h: 500, l: 400 }, bx, true), exE = boxText({ w: 600, h: 500, l: 400 }, bx);
+      var exE = boxText({ w: 600, h: 500, l: 400 }, bx);
       h += '<div class="kv"><span>記号を付ける</span><div class="sides">' + bx.order.map(function (L) { return labBtn(ROLE_KEY[UA.boxRole(L)], L); }).join('') +
         '</div><span class="hint">E列：' + esc(exE) + '</span></div>';
       h += '<div class="kv"><span>面の数</span><div class="segs">' + [[false, '6面'], [true, '5面']].map(function (x) {
         return '<button type="button" class="seg' + (ex.five === x[0] ? ' on' : '') + '" data-act="bFive" data-v="' + (x[0] ? '1' : '0') + '">' + x[1] + '</button>'; }).join('') + '</div><span class="hint">面積×' + esc(String((st.master.output && st.master.output.boxFactor) || '（設定マスタ）')) + '。チャンバー・ガラリは5面</span></div>';
       h += ductThickChips(bx, 'bF', 'bFx');
-      h += '<div class="hint">E列には3辺とも書きます。記号は押した辺だけ数字の後に付けます。5面は W×H の面が開いている面です。' +
-        'Excel に記号なしで打った寸法もこの並びで読みます（600×500×400 → ' + esc(exT) + '）。記号付き（1500×500×1200H など）は並びに関係なく記号で読みます</div>';
       return h;
     }
     return h;
