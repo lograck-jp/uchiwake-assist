@@ -2139,7 +2139,7 @@
   };
   // 経費の金額の見込み（画面の表示用）
   /* ---------- エルボ 1式（選んでいる行の塊） ----------
-     塊（仕様の行から下の明細）の最後の行の下に E=エルボ・G=1・H=式・K=率・L=ROUNDUP(SUM(単位 m の明細の J列)*K,-1)・I=L。
+     塊（仕様の行から下の明細）の最後の行の下に E=エルボ・G=1・H=式・K=率・L=ROUNDUP(SUM(単位 m の明細の J列)*K,-1)・J=L（I列の単価は空欄）。
      塊にエルボ（E=エルボ・H=式）が既にあれば、その行の式を書き直す（行は増やさない）。
      すぐ下が計の行なら、計の範囲に入るように塊の中に1行入れる。それ以外は「エルボ・空き行」の2行ぶん空ける */
   UA.elbowPlan = function (sc, g, R, opt) {
@@ -2183,7 +2183,8 @@
     var formula = '=ROUNDUP(SUM(' + refs.join(',') + ')*K' + t + ',-1)';
     var writes = [
       { r: t, col: 'E', v: label, align: 'Right' }, { r: t, col: 'G', v: 1 }, { r: t, col: 'H', v: '式' },
-      { r: t, col: 'I', v: '=L' + t }, { r: t, col: 'L', v: formula }
+      // 単価（I列）は空欄、金額（J列）に =L（v2.0.17。前は I列に =L を入れて J列の金額式で金額にしていた）
+      { r: t, col: 'I', v: '' }, { r: t, col: 'J', v: '=L' + t }, { r: t, col: 'L', v: formula }
     ];
     if (!elb || isEmpty(v(t, 10))) writes.push({ r: t, col: 'K', v: rate });
     var sum = 0; lines.forEach(function (x) { if (typeof x.J === 'number') sum += x.J; });
