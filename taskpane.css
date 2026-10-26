@@ -12,7 +12,7 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-family: var(--ui); font-size: 12.5px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
-button, input, select { font-family: inherit; font-size: inherit; color: inherit; }
+button, input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .42; }
 :focus-visible { outline: 2px solid var(--wool); outline-offset: 1px; }
@@ -58,7 +58,7 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 
 /* ---- タブ ---- */
 .tabs { display: flex; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--line); flex-shrink: 0; }
-.tab { flex: 1; height: 34px; border: 0; background: transparent; color: var(--muted); font-size: 12.5px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab { flex: 1; min-width: 0; height: 34px; padding: 0 2px; border: 0; background: transparent; color: var(--muted); font-size: 12px; white-space: nowrap; border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .tab:hover { color: var(--sub); }
 .tab.on { color: var(--text); font-weight: 700; border-bottom-color: var(--wool); }
 
@@ -345,3 +345,27 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .ftbtn.sub { border-color: var(--line2); color: var(--sub); font-weight: 600; padding: 0 8px; font-size: 12px; }
 .ft { gap: 6px; }
 .ftbtn.sub:hover:not(:disabled) { background: var(--raised); }
+
+/* v2.0.13 設定マスタの読み直しのお知らせ */
+.mnote { margin: 6px 12px 0; padding: 8px 10px; border-radius: 8px; background: var(--warn-bg, #3A3226); color: var(--warn, #FFC766); font-size: 11.5px; line-height: 1.6; flex-shrink: 0; }
+.mnote .link { margin-left: 4px; padding: 0 2px; text-decoration: underline; }
+
+/* ---- 見積条件 ---- */
+.in.ta { height: auto; min-height: 50px; padding: 6px 8px; line-height: 1.55; resize: vertical; }
+.cnds { display: flex; flex-direction: column; gap: 4px; }
+.cnds .slgt { margin-top: 4px; }
+.cnd { display: flex; align-items: flex-start; gap: 4px; padding: 7px 4px 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.cnd.on { border-color: var(--wool-line); }
+.cnd.off { background: transparent; }
+.cnd.off .cnd-t { color: var(--muted); }
+.cnd.have { background: transparent; border-style: dashed; }
+.cnd.have .cnd-t { color: var(--muted); }
+.cnd.edit { flex-direction: column; align-items: stretch; gap: 6px; padding: 8px; border-color: var(--wool-line); }
+.cnd-l { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.cnd-l input { width: 15px; height: 15px; margin: 2px 0 0; accent-color: var(--wool); flex-shrink: 0; }
+.cnd-t { min-width: 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.cnd-t .c2 { display: block; padding-left: 1.5em; }
+.cnd-t small { display: block; color: var(--muted); font-size: 10px; }
+.cnd-t .tg { font-style: normal; margin-left: 5px; font-size: 9.5px; padding: 0 5px; border-radius: 4px; background: var(--wool-soft); color: var(--wool); white-space: nowrap; }
+.cnd-a { display: flex; flex-shrink: 0; }
+.cnd-tools { justify-content: flex-end; }

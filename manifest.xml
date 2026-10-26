@@ -6,7 +6,7 @@
            xsi:type="TaskPaneApp">
   <Id>6bb8d930-ad76-4a17-a2e0-931947f1a444</Id>
   <Version>1.0.0.0</Version>
-  <ProviderName>伊藤（札幌支店）</ProviderName>
+  <ProviderName>内訳アシスト</ProviderName>
   <DefaultLocale>ja-JP</DefaultLocale>
   <DisplayName DefaultValue="内訳アシスト"/>
   <Description DefaultValue="保温工事の見積内訳を、品目・施工箇所・仕様・サイズを選んで内訳シートへ登録します。"/>

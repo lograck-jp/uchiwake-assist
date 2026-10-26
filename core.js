@@ -159,7 +159,7 @@
     var cols = { area: 'A', sys: 'B', place: 'C', d: 'D', spec: 'E', size: 'E', f: 'F', g: 'G', h: 'H', i: 'I', j: 'J', label: 'I' };
     var refCols = { y: 'Y', z: 'Z', aa: 'AA', ab: 'AB' };
     var REFKEY = { '単価の参照元': 'y', '参照した仕様': 'z', '参照したサイズ': 'aa', '参照した厚み': 'ab' };
-    var out = { cols: cols, refCols: refCols, priceSrc: '保温積算資料', skFactor: 1, makeTotals: false, elbowRate: 0.35, elbowLabel: 'エルボ', valveThick: [25, 50], thickList: ['20', '25', '30', '40', '50', '65', '75'], startRow: 5, amountTpl: '=IF(AND(G{行}<>"",I{行}=""),0,IF(AND(G{行}="",I{行}=""),"",IF(AND(G{行}<>"",I{行}<>""),G{行}*I{行},"")))' };
+    var out = { cols: cols, refCols: refCols, priceSrc: '保温積算資料', skFactor: 1, makeTotals: false, elbowRate: 0, elbowLabel: 'エルボ', valveThick: [], thickList: ['20', '25', '30', '40', '50', '65', '75'], startRow: 5, amountTpl: '=IF(AND(G{行}<>"",I{行}=""),0,IF(AND(G{行}="",I{行}=""),"",IF(AND(G{行}<>"",I{行}<>""),G{行}*I{行},"")))' };
     var MAPKEY = { '大項目': 'area', '系統': 'sys', '施工箇所': 'place', '種別': 'd', '仕様': 'spec', 'サイズ': 'size', '保温厚': 'f', '数量': 'g', '単位': 'h', '単価': 'i', '金額': 'j', '系統計（ラベル）': 'label' };
     (sheets['M_出力設定'] || []).forEach(function (r) {
       var k = str(pick(r, '項目')), c = trimAll(pick(r, '列')), v = str(pick(r, '書き込む内容'));
@@ -172,6 +172,7 @@
       if (k === '保温厚の候補' && v) out.thickList = String(v).split(/[、,，\s]+/).map(function (x) { return thickKey(x); }).filter(Boolean);
       if (k === '保温積算資料の掛率' && num(v) > 0) out.skFactor = num(v);
       if (k === 'エルボの率' && num(v) > 0) out.elbowRate = num(v);
+      if (k === 'BOXの面積の割増' && num(v) > 0) out.boxFactor = num(v);
       if (k === 'エルボの表記' && v) out.elbowLabel = v;
       if (k === 'バルブ・フランジの保温厚' && v) out.valveThick = String(v).split(/[、,，\s]+/).map(function (x) { return num(x); }).filter(function (x) { return x > 0; }).sort(function (a, b) { return a - b; });
     });
@@ -216,6 +217,28 @@
           factor: num(pick(r, '係数')) || 1, round: roundKey(str(pick(r, '端数'))), memo: str(pick(r, 'メモ'))
         };
       }).filter(function (x) { return x.name || x.words; });
+    }
+    // 経費の率（M_経費）：項目（資材運搬交通費・諸経費・法定福利費）ごとに K列・L列の値
+    if (sheets['M_経費']) {
+      var ex = {};
+      sheets['M_経費'].forEach(function (r) {
+        var key = trimAll(pick(r, 'キー')), lab = str(pick(r, '項目'));
+        if (!key) key = /運搬|交通費/.test(lab) ? 'transport' : /諸経費/.test(lab) ? 'misc' : /法定福利/.test(lab) ? 'welfare' : '';
+        if (!key) return;
+        ex[key] = { on: useOK(pick(r, '使用する')), label: lab || key, k: isEmpty(pick(r, 'K列')) ? '' : num(pick(r, 'K列')), l: isEmpty(pick(r, 'L列')) ? '' : num(pick(r, 'L列')) };
+      });
+      if (Object.keys(ex).length) m.expenseRaw = ex;
+    }
+    // 見積条件（M_見積条件）：パネルの「見積条件」タブに出す文章。「一、」は付けても付けなくてもよい。
+    // セルの中で改行（Alt+Enter）した2行目からは、内訳の B列に続けて書く
+    if (sheets['M_見積条件']) {
+      var seenC = {};
+      m.conditions = sheets['M_見積条件'].map(function (r, i) {
+        var t = condClean(pick(r, '見積条件'));
+        return { id: 'm:' + UA.condKey(t), text: t, cat: str(pick(r, '分類')), always: /^[○〇oO]$/.test(trimAll(pick(r, 'いつも入れる'))),
+          use: useOK(pick(r, '使用する')), order: num(pick(r, '表示順')) || (1000 + i), memo: str(pick(r, 'メモ')) };
+      }).filter(function (x) { if (!x.text || !x.use || x.id === 'm:' || seenC[x.id]) return false; seenC[x.id] = true; return true; });
+      m.conditions.sort(bySort);
     }
     if (!m.kinds.length) errors.push('M_品目 に品目がありません');
     m.errors = errors;
@@ -545,173 +568,13 @@
   }
   UA.matLabel = matLabel;
 
-  // ---- 対応表（既定）----
+  // ---- 対応表 ----
+  // 仕様と保温積算資料の表の対応は、設定マスタの M_積算資料対応 だけに持つ（公開するプログラムには入れない）
   // [品目, 種別, 場所, 仕様（* と ? が使える）, 表ID, 列（仕上げ）, 行, 上被の表ID, 掛率, 加算, サイズ下限, サイズ上限, メモ]
-  //  品目：pipe / valve / flange / rect / round / box（カンマ区切り可、* はすべて）
-  //  場所：屋内露出 / 隠蔽 / ピット / 屋外露出 / 多湿 / 内貼 / *（M_施工箇所の「積算資料の場所」で決まる）
-  //  表ID：「配管」と書くと、同じ仕様の配管の単価を使う（掛率をかける）
-  //  列：空欄＝保温厚の列。文字＝その仕上げの列（厚み付きの見出しは保温厚も合わせる）
-  //  行：空欄＝サイズ。「自動」＝仕様の保温材（Gw板40K→グラスウール板40K など）＋保温厚。その他＝行の名前
-  function skDefaultRules() {
-    var R = [];
-    function add(items, ds, place, pat, id, col, row, over, factor, plus, memo) { R.push([items, ds || '', place, pat, id, col || '', row || '', over || '', factor || '', plus || '', '', '', memo || '']); }
-    function P(place, pat, id, over, memo) { add('pipe', '', place, pat, id, '', '', over, '', '', memo); }
-    var M16 = '表は亀甲金網16mm';
-    // --- 配管：グラスウール筒 ---
-    P('屋内露出', 'Gw筒＋ポリ*＋整形原紙＋綿*', '2-1'); P('屋内露出', 'Gw筒＋ポリ*＋整形原紙＋*テープ', '2-2');
-    P('屋内露出', 'Gw筒＋ポリ*＋ALGC原紙＋ALGC粘着テープ', '2-3'); P('屋内露出', 'Gw筒＋ポリ*＋ファインカバー', '2-4');
-    P('屋内露出', 'Gw筒＋ポリ*＋着色ALGC原紙＋着色ALGC粘着テープ', '2-5');
-    P('屋内露出', 'ALK-P付Gw筒＋カラー金網10m/m', '2-6'); P('屋内露出', 'ALGC-P付Gw筒＋*カラー金網10m/m', '2-7');
-    P('屋内露出', 'Gw筒＋整形原紙＋綿*', '1-1'); P('屋内露出', 'Gw筒＋整形原紙＋*テープ', '1-2');
-    P('屋内露出', 'Gw筒＋ALGC原紙＋ALGC粘着テープ', '1-3'); P('屋内露出', 'Gw筒＋ファインカバー', '1-4');
-    P('屋内露出', 'Gw筒＋着色ALGC原紙＋着色ALGC粘着テープ', '1-5'); P('屋内露出', '着色ALGC付Gw筒＋着色ALGC粘着テープ', '1-5', '', '表は着色ALGC化粧原紙');
-    P('屋内露出', 'ALK付Gw筒＋カラー金網10m/m', '1-6'); P('屋内露出', 'ALGC付Gw筒＋*カラー金網10m/m', '1-7');
-    P('隠蔽', 'Gw筒＋ポリ*＋*テープ', '4-1'); P('隠蔽', 'ALK-P付Gw筒＋亀甲金網16m/m', '4-2'); P('隠蔽', 'ALK-P付Gw筒＋カラー金網16m/m', '4-2', '', M16);
-    P('隠蔽', 'ALGC-P付Gw筒＋*亀甲金網16m/m', '4-3'); P('隠蔽', 'ALGC-P付Gw筒＋ALGC粘着テープ', '4-3', '', '表は亀甲金網16mm込み');
-    P('隠蔽', 'Gw筒＋*テープ', '3-1'); P('隠蔽', 'ALGC付Gw筒＋ALGC粘着テープ', '3-2'); P('隠蔽', 'ALGC付Gw筒＋*亀甲金網16m/m', '3-3');
-    P('隠蔽', 'ALK付Gw筒＋亀甲金網16m/m', '3-4'); P('隠蔽', 'ALK付Gw筒＋カラー金網16m/m', '3-4', '', M16);
-    P('ピット', 'Gw筒＋ポリ*＋着色ALGC*', '5-1'); P('ピット', '着色ALGC-P付Gw筒＋着色ALGC粘着テープ', '5-1', '', '表はポリエチレンフィルム＋着色ALGCテープ');
-    P('ピット', 'ALW裏貼Gw筒＋カラー金網16m/m', '5-2');
-    P('*', 'Gw筒＋ポリ*＋カラー鉄板', '6-1', '19-3'); P('*', 'Gw筒＋ポリ*＋*ステンレス*', '6-1', '19-5'); P('*', 'Gw筒＋ポリ*＋ガルバ*', '6-1', '19-4'); P('*', 'Gw筒＋ポリ*＋亜鉛鉄板', '6-1', '19-2');
-    P('*', 'Gw筒＋ポリテープ', '6-1'); P('*', 'Gw筒＋ポリフィルム', '6-1');
-    P('*', 'ALW裏貼Gw筒＋カラー鉄板', '6-1', '19-3', 'ALW貼は§6で代用'); P('*', 'ALW裏貼Gw筒＋ガルバ*', '6-1', '19-4', 'ALW貼は§6で代用');
-    P('*', 'Gw筒＋カラー鉄板', '7-1', '19-3'); P('*', 'Gw筒＋*ステンレス*', '7-1', '19-5'); P('*', 'Gw筒＋ガルバ*', '7-1', '19-4'); P('*', 'Gw筒＋亜鉛鉄板', '7-1', '19-2');
-    P('*', 'ALK付Gw筒＋カラー鉄板', '7-1', '19-3', 'ALK貼の分は含まず');
-    P('*', 'Gw筒＋ファインジャケット', '7-1', '19-1', 'ファインカバーJを上被で計上'); P('*', 'Gw筒', '7-1');
-    // --- 配管：ロックウール筒 ---
-    P('屋内露出', 'Rw筒＋ポリ*＋整形原紙＋綿*', '9-1'); P('屋内露出', 'Rw筒＋ポリ*＋整形原紙＋*テープ', '9-2');
-    P('屋内露出', 'Rw筒＋ポリ*＋ALGC原紙＋ALGC粘着テープ', '9-3'); P('屋内露出', 'Rw筒＋ポリ*＋ファインカバー', '9-4');
-    P('屋内露出', 'Rw筒＋ポリ*＋着色ALGC原紙＋着色ALGC粘着テープ', '9-5'); P('屋内露出', 'ALK-P付Rw筒＋カラー金網10m/m', '9-6');
-    P('屋内露出', 'Rw筒＋整形原紙＋綿*', '8-1'); P('屋内露出', 'Rw筒＋整形原紙＋*テープ', '8-2'); P('屋内露出', 'Rw筒＋ALGC原紙＋ALGC粘着テープ', '8-3');
-    P('屋内露出', 'Rw筒＋ファインカバー', '8-4'); P('屋内露出', 'Rw筒＋着色ALGC原紙＋着色ALGC粘着テープ', '8-5'); P('屋内露出', 'ALK付Rw筒＋カラー金網10m/m', '8-6');
-    P('隠蔽', 'Rw筒＋ポリ*＋*テープ', '10-2'); P('隠蔽', 'Rw筒＋*テープ', '10-1'); P('隠蔽', 'ALGC付Rw筒＋ALGC粘着テープ', '10-3');
-    P('隠蔽', 'ALGC-P付Rw筒＋ALGC粘着テープ', '10-3', '', 'ポリ付きの表なし（ALGC貼の表）'); P('隠蔽', 'ALK付Rw筒＋亀甲金網16m/m', '10-4'); P('隠蔽', 'ALK付Rw筒＋カラー金網*', '10-4', '', M16);
-    P('ピット', 'Rw筒＋ポリ*＋着色ALGC*', '11-1'); P('ピット', '着色ALGC-P付Rw筒＋着色ALGC粘着テープ', '11-1', '', '表はポリエチレンフィルム＋着色ALGCテープ');
-    P('ピット', 'ALW裏貼Rw筒＋カラー金網16m/m', '11-2');
-    P('*', 'Rw筒＋ポリ*＋カラー鉄板', '12-1', '19-3'); P('*', 'Rw筒＋ポリ*＋*ステンレス*', '12-1', '19-5'); P('*', 'Rw筒＋ポリ*＋ガルバ*', '12-1', '19-4'); P('*', 'Rw筒＋ポリ*＋亜鉛鉄板', '12-1', '19-2');
-    P('*', 'Rw筒＋ポリテープ', '12-1'); P('*', 'Rw筒＋ポリフィルム', '12-1');
-    P('*', 'Rw筒＋カラー鉄板', '13-1', '19-3'); P('*', 'Rw筒＋*ステンレス*', '13-1', '19-5'); P('*', 'Rw筒＋ガルバ*', '13-1', '19-4'); P('*', 'Rw筒＋亜鉛鉄板', '13-1', '19-2');
-    P('*', 'ALK付Rw筒＋カラー鉄板', '13-1', '19-3', 'ALK貼の分は含まず'); P('*', 'Rw筒', '13-1');
-    // --- 配管：ポリスチレンフォーム筒（PF筒） ---
-    P('屋内露出', 'PF筒＋ポリ*＋整形原紙＋綿*', '14-2'); P('屋内露出', 'PF筒＋整形原紙＋綿*', '14-1'); P('屋内露出', 'PF筒＋*ファインカバー', '14-3');
-    P('屋内露出', 'PF筒＋ポリ*＋整形原紙＋*テープ', '14-5'); P('屋内露出', 'PF筒＋整形原紙＋*テープ', '14-4');
-    P('屋内露出', 'PF筒＋ポリ*＋ALGC原紙＋ALGC粘着テープ', '14-7'); P('屋内露出', 'PF筒＋ALGC原紙＋ALGC粘着テープ', '14-6');
-    P('屋内露出', 'PF筒＋ポリ*＋着色ALGC原紙＋着色ALGC粘着テープ', '14-8'); P('屋内露出', 'ALK-P付PF筒＋カラー金網10m/m', '14-9');
-    P('隠蔽', 'PF筒＋ポリ*＋*テープ', '15-2'); P('隠蔽', 'PF筒＋ビニルテープ', '15-3'); P('隠蔽', 'PF筒＋*テープ', '15-1');
-    P('隠蔽', 'ALGC付PF筒*＋ALGC粘着テープ', '15-4'); P('隠蔽', 'PF筒＋アルミクラフト*', '15-5'); P('隠蔽', 'ALK-P付PF筒＋亀甲金網16m/m', '15-6');
-    P('ピット', 'PF筒＋ポリ*＋着色ALGC*', '16-1'); P('ピット', '着色ALGC-P付PF筒＋着色ALGC粘着テープ', '16-1', '', '表はポリエチレンフィルム＋着色ALGCテープ');
-    P('ピット', 'PF筒＋着色ALGC*', '16-1', '', '表はポリエチレンフィルム付き'); P('ピット', 'ALW裏貼PF筒＋カラー金網16m/m', '16-2');
-    P('*', 'PF筒＋ポリ*＋カラー鉄板', '17-1', '19-3'); P('*', 'PF筒＋ポリ*＋*ステンレス*', '17-1', '19-5'); P('*', 'PF筒＋ポリ*＋ガルバ*', '17-1', '19-4'); P('*', 'PF筒＋ポリ*＋亜鉛鉄板', '17-1', '19-2');
-    P('*', 'PF筒＋ポリテープ', '17-1'); P('*', 'PF筒＋ポリフィルム', '17-1');
-    P('*', 'PF筒＋カラー鉄板', '18-1', '19-3'); P('*', 'PF筒＋*ステンレス*', '18-1', '19-5'); P('*', 'PF筒＋ガルバ*', '18-1', '19-4'); P('*', 'PF筒＋亜鉛鉄板', '18-1', '19-2'); P('*', 'PF筒', '18-1');
-    // --- 配管：上被だけ・パイプガード・防食 ---
-    P('*', 'ファインカバー', '19-1'); P('*', '亜鉛鉄板', '19-2'); P('*', 'カラー鉄板', '19-3'); P('*', 'ガルバ*', '19-4'); P('*', 'ステンレス*', '19-5');
-    add('pipe', '', '*', 'パイプガード*', '20-1', '直管部 20mm');
-    add('pipe', '', '*', '防食ビニ*', '21-1', '防食ビニールテープ 1/2・3回巻'); add('pipe', '', '*', '防食テープ', '21-1', '防食ビニールテープ 1/2・3回巻');
-    add('pipe', '', '*', '自己融着テープ*0.4*', '21-1', '自己融着テープ 0.4mm 1/2・1回巻'); add('pipe', '', '*', '自己融着テープ*1.0*', '21-1', '自己融着テープ 1.0mm 1/2・2回巻');
-    add('pipe', '', '*', '*ペトロ*シート*', '21-1', '継手部 ペトロ系ペースト/ペトロラタムシート/プラスチックテープ');
-    add('pipe', '', '*', '*ペトロ*', '21-1', '配管部 ペトロ系ペースト/ペトロラタムテープ/プラスチックテープ');
-    // --- 弁・フランジ（65A以上。小さいGVで筒の仕様は配管×1.2） ---
-    add('valve', 'GV', '*', '*筒＋*', '配管', '', '', '', 1.2, '', '配管の単価×1.2（GV）');
-    function V(items, ds, gw, rw) {
-      var c1 = 'GWロール(ALK)24K×50mm+カラー亀甲金網10mm', c2 = 'GW帯(ALGC)40K×50mm+カラー亀甲金網10mm';
-      if (gw === '24-1') {
-        add(items, ds, '*', '*Gw*＋*亜鉛鉄板', gw, 'グラスウール保温帯40K×50mm+ポリエチレンフィルム 亜鉛鉄板');
-        add(items, ds, '*', '*Gw*＋*カラー鉄板', gw, 'カラー鉄板'); add(items, ds, '*', '*Gw*＋*ガルバ*', gw, 'ガルバニウム鋼板'); add(items, ds, '*', '*Gw*＋*ステンレス*', gw, 'ステンレス鋼板 SUS304');
-      } else {
-        add(items, ds, '*', '*Gw帯*＋*カラー鉄板', gw, 'グラスウール保温帯40K×50mm+ポリエチレンフィルム カラー鉄板');
-        add(items, ds, '*', '*Gw帯*＋*ガルバ*', gw, 'ガルバニウム鋼板'); add(items, ds, '*', '*Gw帯*＋*ステンレス*', gw, 'ステンレス鋼板 SUS304');
-        add(items, ds, '屋内露出', 'ALK*Gwロール*＋カラー金網10m/m', gw, c1);
-        add(items, ds, '*', 'ALK*Gwロール*', gw, c1, '', '', '', '', '表はカラー亀甲金網10mm');
-        add(items, ds, '屋内露出', 'ALGC*Gw帯*＋*カラー金網10m/m', gw, c2);
-        add(items, ds, '*', '*ALGC*Gw帯*', gw, c2, '', '', '', '', '表はALGC貼＋カラー亀甲金網10mm');
-        add(items, ds, '*', '*Gw帯*ALGC*', gw, c2, '', '', '', '', '表はALGC貼＋カラー亀甲金網10mm');
-      }
-      if (rw === '27-1') {
-        add(items, ds, '*', '*Rw*＋*亜鉛鉄板', rw, 'ロックウール保温帯1号×50mm+ポリエチレンフィルム 亜鉛鉄板');
-      } else {
-        add(items, ds, '*', '*Rw*＋*亜鉛鉄板', rw, 'ロックウール保温帯1号×50mm+ポリエチレンフィルム 亜鉛鉄板');
-        add(items, ds, '*', '*Rw*＋*カラー金網10m/m', rw, 'RW帯(ALGC)1号50mm+カラー亀甲金網10mm');
-      }
-      add(items, ds, '*', '*Rw*＋*カラー鉄板', rw, 'カラー鉄板'); add(items, ds, '*', '*Rw*＋*ガルバ*', rw, 'ガルバニウム鋼板'); add(items, ds, '*', '*Rw*＋*ステンレス*', rw, 'ステンレス鋼板 SUS304');
-    }
-    V('valve,flange', 'BV,BAV,バタフライ*,FLG,フランジ,FJ*,SUSFJ', '23-1', '26-1');
-    V('valve', 'ラインポンプ,ポンプ', '24-1', '27-1');
-    V('valve', '', '22-1', '25-1');
-    V('flange', '', '23-1', '26-1');
-    // --- 丸ダクト ---
-    function D(place, pat, id, col, memo) { add('round', '', place, pat, id, col, '', '', '', '', memo); }
-    var K10 = 'カラー亀甲金網10mm', K16 = '亀甲金網16mm';
-    D('屋内露出', 'ALK付Gwロール32K＋カラー金網10m/m', '35-5', '(ALK貼)/AL粘着テープ/' + K10); D('屋内露出', 'ALW裏貼Gwロール32K＋カラー金網10m/m', '35-5', '(ALW貼)/ALW粘着テープ/' + K10);
-    D('屋内露出', 'ALGC付Gwロール32K＋*カラー金網10m/m', '35-5', '(ALGC貼)/ALGC粘着テープ/' + K10);
-    D('屋内露出', 'ALK付Gwロール*＋カラー金網10m/m', '35-3', '(ALK貼)/AL粘着テープ/' + K10); D('屋内露出', 'ALW裏貼Gwロール*＋カラー金網10m/m', '35-3', '(ALW貼)/ALW粘着テープ/' + K10);
-    D('屋内露出', 'ALGC付Gwロール*＋*カラー金網10m/m', '35-3', '(ALGC貼)/ALGC粘着テープ/' + K10);
-    D('屋内露出', '*Gwロール32K＋整形原紙＋綿*', '35-4', '整形原紙/綿布'); D('屋内露出', '*Gwロール32K＋整形原紙＋*', '35-4', '整形原紙/アルミガラスクロス');
-    D('屋内露出', '*Gwロール*＋整形原紙＋綿*', '35-1', '整形原紙/綿布'); D('屋内露出', '*Gwロール*＋整形原紙＋*', '35-1', '整形原紙/アルミガラスクロス');
-    D('屋内露出', '*Gwロール*＋亜鉛鉄板', '35-2', '亜鉛鉄板'); D('屋内露出', '*Gwロール*＋カラー鉄板', '35-2', 'カラー鉄板'); D('屋内露出', '*Gwロール*＋ガルバ*', '35-2', 'ガルバニウム鋼板'); D('屋内露出', '*Gwロール*＋*ステンレス*', '35-2', 'ステンレス鋼板');
-    D('屋内露出', '*Gw帯*＋カラー鉄板', '35-7', 'カラー鉄板'); D('屋内露出', '*Gw帯*＋ガルバ*', '35-7', 'ガルバニウム鋼板'); D('屋内露出', '*Gw帯*＋*ステンレス*', '35-7', 'ステンレス鋼板');
-    D('屋内露出', '*波形*＋*カラー金網10m/m', '35-8', 'GW波形保温板40K(ALGC)/ALGC粘着テープ/' + K10); D('屋内露出', '*ウェーブ*＋*カラー金網10m/m', '35-8', 'GW波形保温板40K(ALGC)/ALGC粘着テープ/' + K10);
-    D('屋内露出', '*波形*＋*ALGC粘着テープ', '35-8', 'GW波形保温板40K(ALGC)/ALGC粘着テープ'); D('屋内露出', '*ウェーブ*＋*ALGC粘着テープ', '35-8', 'GW波形保温板40K(ALGC)/ALGC粘着テープ');
-    D('屋内露出', 'ALGC付Gw帯*＋*カラー金網10m/m', '35-8', 'GW帯40K(ALGC)/ALGC粘着テープ/' + K10); D('屋内露出', 'ALGC付Gw帯*＋ALGC粘着テープ', '35-8', 'GW帯40K(ALGC)/ALGC粘着テープ');
-    D('屋内露出', '*着色ALGC*Gw帯*', '35-6', '着色ALGC化粧原紙/着色ALGC粘着テープ'); D('屋内露出', '*Gw帯*＋整形原紙＋綿*', '35-6', '整形原紙/綿布'); D('屋内露出', '*Gw帯*＋整形原紙＋*', '35-6', '整形原紙/アルミガラスクロス');
-    D('屋内露出', 'Rw帯*＋亜鉛鉄板', '38-1', '亜鉛鉄板'); D('屋内露出', 'Rw帯*＋カラー鉄板', '38-1', 'カラー鉄板'); D('屋内露出', 'Rw帯*＋ガルバ*', '38-1', 'ガルバリウム鋼板'); D('屋内露出', 'Rw帯*＋*ステンレス*', '38-1', 'ステンレス鋼板');
-    D('屋内露出', 'ALK付Rw*＋カラー金網10m/m', '38-2', 'RWフェルト1号(ALK貼)/ALK粘着テープ/' + K10);
-    D('屋内露出', 'ALGC付Rw帯*＋*カラー金網10m/m', '38-2', 'RW帯1号(ALGC)/ALGC粘着テープ/' + K10); D('屋内露出', 'ALGC付Rw帯*＋ALGC粘着テープ', '38-2', 'RW帯1号(ALGC)/ALGC粘着テープ');
-    D('屋内露出', 'ALGC付Rwフェルト*＋カラー金網10m/m', '38-2', 'RW帯1号(ALGC)/ALGC粘着テープ/' + K10, '表はRW帯1号(ALGC)');
-    D('隠蔽', 'ALK付Gwロール32K＋*金網16m/m', '36-2', '(ALK貼)/AL粘着テープ/' + K16); D('隠蔽', 'ALW裏貼Gwロール32K＋*金網16m/m', '36-2', '(ALW貼)/ALW粘着テープ/' + K16);
-    D('隠蔽', 'ALGC付Gwロール32K＋*亀甲金網16m/m', '36-2', '(ALGC貼)/ALGC粘着テープ/' + K16);
-    D('隠蔽', 'ALK付Gwロール*＋亀甲金網16m/m', '36-1', '(ALK貼)/AL粘着テープ/' + K16); D('隠蔽', 'ALK付Gwロール*＋カラー金網*', '36-1', '(ALK貼)/AL粘着テープ/' + K16, M16);
-    D('隠蔽', 'ALW裏貼Gwロール*＋*金網16m/m', '36-1', '(ALW貼)/ALW粘着テープ/' + K16); D('隠蔽', 'ALGC付Gwロール*＋*亀甲金網16m/m', '36-1', '(ALGC貼)/ALGC粘着テープ/' + K16);
-    D('隠蔽', '*波形*＋*亀甲金網16m/m', '36-3', 'GW波形保温板40K(ALGC)/ALGC粘着テープ/' + K16); D('隠蔽', '*ウェーブ*＋*亀甲金網16m/m', '36-3', 'GW波形保温板40K(ALGC)/ALGC粘着テープ/' + K16);
-    D('隠蔽', '*波形*＋*ALGC粘着テープ', '36-3', 'GW波形保温板40K(ALGC)/ALGC粘着テープ'); D('隠蔽', '*ウェーブ*＋*ALGC粘着テープ', '36-3', 'GW波形保温板40K(ALGC)/ALGC粘着テープ');
-    D('隠蔽', 'ALGC付Gw帯*＋*亀甲金網16m/m', '36-3', 'GW帯40K(ALGC)/ALGC粘着テープ/' + K16); D('隠蔽', 'ALGC付Gw帯*＋ALGC粘着テープ', '36-3', 'GW帯40K(ALGC)/ALGC粘着テープ');
-    D('隠蔽', 'ALK付Rw*＋*金網16m/m', '39-1', 'RWフェルト1号(ALK貼)/ALK粘着テープ/' + K16); D('隠蔽', 'Rw帯*＋アルミガラスクロス*＋亀甲金網16m/m', '39-1', 'RW帯1号/アルミガラスクロス/' + K16);
-    D('隠蔽', 'Rw帯*＋亀甲金網16m/m', '39-1', 'RW帯1号/' + K16); D('隠蔽', 'ALGC付Rw*＋*亀甲金網16m/m', '39-2', 'ALGC粘着テープ/' + K16);
-    D('隠蔽', 'ALGC付Rw帯*＋ALGC粘着テープ', '39-2', 'ALGC粘着テープ'); D('隠蔽', 'ALGC付Rwフェルト*＋カラー金網*', '39-2', 'ALGC粘着テープ/' + K16, '表はRW帯1号(ALGC)＋亀甲金網16mm');
-    ['屋外露出', '多湿'].forEach(function (pl) {
-      D(pl, '*Gwロール*＋ポリ*＋カラー鉄板', '37-1', 'ポリエチレンフィルム/カラー鉄板'); D(pl, '*Gwロール*＋ポリ*＋ガルバ*', '37-1', 'ポリエチレンフィルム/ガルバリウム鋼板'); D(pl, '*Gwロール*＋ポリ*＋*ステンレス*', '37-1', 'ポリエチレンフィルム/ステンレス鋼板');
-      D(pl, '*Gw帯*＋ポリ*＋カラー鉄板', '37-2', 'ポリエチレンフィルム/カラー鉄板'); D(pl, '*Gw帯*＋ポリ*＋ガルバ*', '37-2', 'ポリエチレンフィルム/ガルバリウム鋼板'); D(pl, '*Gw帯*＋ポリ*＋*ステンレス*', '37-2', 'ポリエチレンフィルム/ステンレス鋼板');
-      D(pl, '*Rw*＋ポリ*＋カラー鉄板', '40-1', 'ポリエチレンフィルム/カラー鉄板'); D(pl, '*Rw*＋ポリ*＋ガルバ*', '40-1', 'ポリエチレンフィルム/ガルバリウム鋼板'); D(pl, '*Rw*＋ポリ*＋*ステンレス*', '40-1', 'ポリエチレンフィルム/ステンレス鋼板');
-    });
-    D('*', 'エアロフレックス*', '53-1', ''); D('*', 'アーマフレックス*', '53-2', '');
-    // --- 角ダクト・チャンバー（行は仕様の保温材＋保温厚） ---
-    function Q(place, pat, id, col, memo, row) { add('rect,box', '', place, pat, id, col, row || '自動', '', '', '', memo); }
-    [['亜鉛鉄板', '亜鉛鉄板'], ['カラー鉄板', 'カラー鉄板'], ['ガルバ*', 'ガルバニウム鋼板'], ['*ステンレス*', 'ステンレス板'], ['石膏ボード*', '石膏ボード(9mm)/アルミコーナー']].forEach(function (x) {
-      Q('屋内露出', '*板*＋鋼枠＋' + x[0], '31-1b', '鋲/保温板/鋼枠/' + x[1]);
-    });
-    [['亜鉛鉄板', '亜鉛鉄板'], ['カラー鉄板', 'カラー鉄板'], ['ガルバ*', 'ガルバニウム鋼板'], ['*ステンレス*', 'ステンレス板']].forEach(function (x) {
-      Q('屋内露出', '*板*＋' + x[0], '31-1', '鋲/保温板/' + x[1]);
-    });
-    Q('屋内露出', '*鋲＋*板*＋*寒冷紗*', '31-1', '鋲/保温板/角あて/目貼り/接着剤/寒冷紗'); Q('屋内露出', '*鋲＋*板*＋*アルミガラスクロス', '31-1', '鋲/保温板/角あて/目貼り/接着剤/アルミガラスクロス');
-    Q('屋内露出', '*鋲＋ALK*＋カラー金網10m/m*', '31-2', '鋲/保温材(ALK貼)/カラー亀甲金網10mm'); Q('屋内露出', '*鋲＋ALW*＋カラー金網10m/m*', '31-2', '鋲/保温材(ALW貼)/カラー亀甲金網10mm');
-    Q('屋内露出', '*鋲＋着色ALGC*＋着色ALGC粘着テープ*', '31-2', '鋲/保温板(着色ALGC貼)/アルミガラスクロス粘着テープ');
-    Q('屋内露出', '*鋲＋ALGC*＋ALGC粘着テープ＋*亀甲金網*', '31-2', '鋲/保温板(ALGC貼)/アルミガラスクロス粘着テープ/亀甲金網10mm');
-    Q('屋内露出', '*鋲＋ALGC*＋カラー金網10m/m*', '31-2', '鋲/保温材(ALGC貼)/カラー亀甲金網10mm');
-    Q('屋内露出', '*鋲＋ALGC*＋ALGC粘着テープ*', '31-2', '鋲/保温板(ALGC貼)/アルミガラスクロス粘着テープ');
-    Q('屋内露出', '*鋲＋ALK*＋*金網16m/m*', '31-2', '鋲/保温材(ALK貼)/カラー亀甲金網10mm', '露出の表はカラー亀甲金網10mm');
-    Q('隠蔽', '*鋲＋*接着剤＋アルミガラスクロス', '32-1', '鋲/保温材/接着剤/アルミガラスクロス');
-    Q('隠蔽', '*鋲＋ALGC*＋ALGC粘着テープ＋*亀甲金網16m/m', '32-1', '鋲/保温材(ALGC貼)/アルミガラスクロス粘着テープ/亀甲金網16mm');
-    Q('隠蔽', '*鋲＋ALGC*＋亀甲金網16m/m', '32-1', '鋲/保温材(ALGC貼)/アルミガラスクロス粘着テープ/亀甲金網16mm', '表はALGC粘着テープ＋亀甲金網16mm');
-    Q('隠蔽', '*鋲＋ALGC*＋ALGC粘着テープ*', '32-1', '鋲/保温材(ALGC貼)/アルミガラスクロス粘着テープ');
-    Q('隠蔽', '*鋲＋*アルミクラフト*＋亀甲金網16m/m', '32-1', '鋲/保温材/アルミクラフト紙/亀甲金網16mm');
-    Q('隠蔽', '*鋲＋ALK*＋亀甲金網16m/m', '32-1', '鋲/保温板(ALK貼)/亀甲金網16mm'); Q('隠蔽', '*鋲＋ALK*＋*金網*', '32-1', '鋲/保温板(ALK貼)/亀甲金網16mm', M16);
-    ['屋外露出', '多湿'].forEach(function (pl) {
-      [['カラー鉄板', 'カラー鉄板'], ['ガルバ*', 'ガルバ鋼板'], ['*ステンレス*', 'ステンレス板']].forEach(function (x) { Q(pl, '*鋲＋*ポリ*＋鋼枠＋' + x[0], '33-1', '鋲/保温材/ポリエチレンフィルム/鋼枠/' + x[1]); });
-      [['カラー鉄板', 'カラー鉄板'], ['ガルバ*', 'ガルバ鉄板'], ['*ステンレス*', 'ステンレス板']].forEach(function (x) { Q(pl, '*鋲＋*ポリ*＋' + x[0], '33-1', '鋲/保温材/ポリエチレンフィルム/' + x[1]); });
-    });
-    Q('内貼', '*GC*板*＋アルミパンチング*', '34-1', '保温板/ガラスクロス/アルミスパンシーティング0.6mm/絶縁座金付スポット鋲', '表はアルミスパンシーティング');
-    Q('内貼', '*GC*板*＋*銅亀甲金網*', '34-1', '鋲/保温板/ガラスクロス/鋼製亀甲金網10mm', '表は鋼製亀甲金網10mm');
-    Q('内貼', '*GC*板*＋*カラー金網10m/m', '34-1', '鋲/保温板/ガラスクロス/カラー亀甲金網10mm');
-    Q('内貼', '*GC*板*＋亀甲金網16m/m', '34-1', '鋲/保温板/ガラスクロス/亀甲金網16mm');
-    Q('内貼', '*GC*板*', '34-1', '鋲/保温板/ガラスクロス');
-    Q('*', 'エアロフレックス*', '52-1', '', '', '角ダクト'); Q('*', 'アーマフレックス*', '52-3', '', '', '角ダクト');
-    return R;
-  }
+  function skDefaultRules() { return []; }
   UA.skDefaultRules = skDefaultRules;
-  // 単価の加算・掛率（既定）[対象, 含む語, 加算(円), 掛率, メモ]
-  UA.skDefaultAdj = function () {
-    return [['仕様', 'ヒーター', 2000, '', 'ヒーター＋2,000円（取付費の行を別に立てるときは外す）'], ['仕様', '断熱鋲', 1500, '', '断熱鋲＋1,500円'], ['サイズ', 'BOX', 1000, '', 'BOX＋1,000円']];
-  };
+  // 単価の加算・掛率 [対象, 含む語, 加算(円), 掛率, メモ]：設定マスタの M_単価加算 だけに持つ
+  UA.skDefaultAdj = function () { return []; };
 
   function listOf(v) { return String(v == null ? '' : v).split(/[,、，]/).map(function (x) { return x.trim(); }).filter(Boolean); }
   // 対応表の行（配列 or シートの行）を照合用に整える
@@ -786,7 +649,8 @@
   // 戻り値 { p, formula, ref:{y,z,aa,ab}, id, approx, memo } / { p:null, why }
   UA.skLook = function (sk, m, q, depth) {
     if (!sk || !sk.tables) return { p: null, why: 'nofile' };
-    var rules = (m && m.skRules && m.skRules.length) ? m.skRules : (UA._skDef || (UA._skDef = UA.compileSkRules(skDefaultRules())));
+    var rules = (m && m.skRules && m.skRules.length) ? m.skRules : [];
+    if (!rules.length) return { p: null, why: '設定マスタに M_積算資料対応 がありません（設定マスタを読み直してください）' };
     var spec = nk(q.spec), pg = UA.placeGroup(m, q.place), item = q.item, d = nk(String(q.d || '').replace(/\(1\.6t\)$/, ''));
     var f = thickKey(q.f), sizeN = parseFloat(toHalf(q.size)), firstWhy = null;
     for (var k = 0; k < rules.length; k++) {
@@ -1089,11 +953,11 @@
     while (k < W.length && (W[k].t === 'line' || W[k].t === 'elbow')) { if (W[k].t === 'line') out.push(W[k]); k++; }
     return out;
   };
-  // バルブ・フランジの保温厚：配管の保温厚以上で一番近い候補（既定 25・50）。候補より厚ければ配管と同じ
+  // バルブ・フランジの保温厚：配管の保温厚以上で一番近い候補（設定マスタ M_出力設定「バルブ・フランジの保温厚」）。候補が無い・候補より厚ければ配管と同じ
   UA.valveThick = function (pipeT, list) {
     var parts = String(pipeT == null ? '' : pipeT).split(/[+＋]/).map(function (x) { return parseFloat(toHalf(x)); }).filter(function (x) { return isFinite(x); });
     if (!parts.length) return '';
-    var tot = parts.reduce(function (a, b) { return a + b; }, 0), L = list && list.length ? list : [25, 50];
+    var tot = parts.reduce(function (a, b) { return a + b; }, 0), L = list && list.length ? list : [];
     for (var i = 0; i < L.length; i++) if (tot <= L[i]) return String(L[i]);
     return thickKey(pipeT);
   };
@@ -1207,7 +1071,7 @@
   // 登録する明細（エルボは「直管の合計×率」の式で J列に入れる）
   function newLines(sel) {
     var lines = sel.lines.map(function (l) { return Object.assign({ t: 'line', isNew: true }, l); });
-    if (sel.item === 'pipe' && sel.elbow) lines.push({ t: 'elbow', isNew: true, e: sel.elbowLabel || 'エルボ', g: 1, h: '式', rate: sel.elbowRate || 0.35 });
+    if (sel.item === 'pipe' && sel.elbow && sel.elbowRate > 0) lines.push({ t: 'elbow', isNew: true, e: sel.elbowLabel || 'エルボ', g: 1, h: '式', rate: sel.elbowRate });
     return lines;
   }
   function isPiece(r) { return PIECE_UNITS.indexOf(trimAll(r.h)) >= 0; }
@@ -1319,7 +1183,8 @@
       if (!x.isNew && !mm) { if (x.elbowRefresh) res.elbowNote = 'エルボ（' + x.finalRow + '行目）は金額の手入力のままです'; return; }
       var run = runAbove(W, idx);
       if (!run.length) return;
-      var rate = x.rateNew || x.rate || (mm ? parseFloat(mm[4]) : 0.35);
+      var rate = x.rateNew || x.rate || (mm ? parseFloat(mm[4]) : 0);
+      if (!(rate > 0)) return;
       var f = '=ROUNDUP(SUM(' + jc + run[0].finalRow + ':' + jc + run[run.length - 1].finalRow + ')*' + fmtN(rate) + ',-1)';
       var sum = 0; run.forEach(function (r) { if (r.i != null && r.g > 0) sum += (r.g + (r.addG || 0)) * r.i; });
       x.jEst = ceil10(sum * rate); x.rateUsed = rate; x.runFrom = run[0].finalRow; x.runTo = run[run.length - 1].finalRow;
@@ -1501,7 +1366,7 @@
      v2.0
      - 行ごとの文脈（大項目・系統・室・仕様・種別）を1回の走査で求める（UA.scan）
      - Excel に直接打ったサイズから、品目・保温厚・単位・単価を決める（自動入力）
-     - 単価の計算ルール（GV 50A以下＝直管×1.1 など。画面で追加・編集できる）
+     - 単価の計算ルール（直管×係数など。設定マスタ M_単価計算、画面で追加・編集できる）
      - 計・小計・工事費計・合計・出精値引き（見積書の VBA「集計」を移植。不具合は直してある）
      - 経費（資材運搬交通費・諸経費・法定福利費）
      ===================================================================== */
@@ -1550,11 +1415,11 @@
   };
   // VP（硬質塩ビ管）の呼び → 単価に使う鋼管の呼び径（A）。30VP は 32A、ほかは同じ数字
   UA.VP_TO_A = { 30: 32 };
-  // BOX・チャンバーの表面積（VBA「見積単価自動入力」と同じ。W×D×H（D＝奥行・長さ L）で
-  //   6面＝2(WH+WD+HD)×1.1、5面＝(WH+2WD+2HD)×1.1（W×H の面が1面だけ）
-  UA.boxArea = function (b, five) {
-    var w = b.w / 1000, d = b.d / 1000, h = b.h / 1000;
-    var a = five ? (w * h + 2 * w * d + 2 * h * d) * 1.1 : 2 * (w * h + w * d + h * d) * 1.1;
+  // BOX・チャンバーの表面積。W×D×H（D＝奥行・長さ L）で 6面＝2(WH+WD+HD)、5面＝(WH+2WD+2HD)（W×H の面が1面だけ）
+  //   k＝面積の割増（設定マスタ M_出力設定「BOXの面積の割増」）
+  UA.boxArea = function (b, five, k) {
+    var w = b.w / 1000, d = b.d / 1000, h = b.h / 1000, kk = k > 0 ? k : 1;
+    var a = five ? (w * h + 2 * w * d + 2 * h * d) * kk : 2 * (w * h + w * d + h * d) * kk;
     return Math.round(a * 1e4) / 1e4;
   };
   // 5面か（チャンバー・ガラリ・名前の末尾が G）
@@ -1719,7 +1584,7 @@
         // 2) バルブ・フランジ：同じ塊の配管（直管）の同じサイズ → 同じ厚み
         l = nearest(L, r, function (q) { return q.blockId === x.blockId && q.cls === 'pipe' && hasF(q) && sameSize(q); });
         if (l) return { f: fStr(l.F), from: '同じ仕様の配管 ' + sk + 'A（' + l.r + '行目）と同じ' };
-        //    別の仕様（ロールなど）の塊：同じ系統の配管の同じサイズから 25以下→25、50以下→50
+        //    別の仕様（ロールなど）の塊：同じ系統の配管の同じサイズから（M_出力設定「バルブ・フランジの保温厚」で丸める）
         l = nearest(L, r, function (q) { return x.sysId && q.sysId === x.sysId && q.cls === 'pipe' && hasF(q) && sameSize(q); });
         if (l) {
           var vt = UA.valveThick(fStr(l.F), m && m.output && m.output.valveThick);
@@ -1794,14 +1659,9 @@
   UA.ROUND_LABEL = ROUND_LABEL; UA.ROUND_HINT = ROUND_HINT;
   function roundKey(t) { var s = trimAll(t); if (!s || /1の位|10円/.test(s)) return 'up10'; if (/10の位|100円/.test(s)) return 'up100'; if (/1円|小数/.test(s)) return 'up1'; if (/なし|そのまま/.test(s)) return 'none'; return 'up10'; }
   UA.roundKey = roundKey;
-  UA.defaultCalcRules = function () {
-    return [
-      { id: 'flex', on: true, name: 'フレックス継手（補修）', items: ['round'], words: 'フレックス継手、フレキ継手、継手補修', min: '', max: '', base: 'run', baseKind: '', factor: 0.8, round: 'up10', memo: '既存マクロ「継手補修×0.8」と同じ' },
-      { id: 'gv50', on: true, name: 'GV（50A以下）', items: ['valve'], words: 'GV', min: '', max: '50', base: 'run', baseKind: '', factor: 1.1, round: 'up10', memo: '' },
-      { id: 'pump', on: false, name: 'ラインポンプ', items: ['valve'], words: 'ラインポンプ', min: '', max: '', base: 'kind', baseKind: 'GV', factor: 1.5, round: 'up10', memo: '既存マクロにある掛率（確認してから使ってください）' },
-      { id: 'ystr', on: false, name: 'Yスト', items: ['valve'], words: 'Yスト', min: '', max: '', base: 'kind', baseKind: 'GV', factor: 1.2, round: 'up10', memo: '既存マクロにある掛率（確認してから使ってください）' }
-    ];
-  };
+  // 単価の計算ルールは設定マスタの M_単価計算 だけに持つ（パネルで直したものはパソコンに記憶）
+  UA.defaultCalcRules = function () { return []; };
+
   function wordsOf(w) { return String(w == null ? '' : w).split(/[、,，\s]+/).map(function (x) { return nk(x); }).filter(Boolean); }
   UA.wordsOf = wordsOf;
   UA.matchCalcRule = function (rules, q) {
@@ -1855,7 +1715,7 @@
     if (!sk) return noPrice('保温積算資料が未読込');
     var look = sz.n, conv = '', size;
     if (q.item === 'rect') size = '矩形';
-    else if (q.item === 'box') size = sz.box ? sz.text : 'BOX';   // 寸法で書いた BOX は「BOX＋1,000円」を足さない（VBA と同じ）
+    else if (q.item === 'box') size = sz.box ? sz.text : 'BOX';   // 寸法で書いた BOX はサイズ「BOX」の加算（M_単価加算）を足さない（VBA と同じ）
     else {
       if (sz.ser === 'Su' || (q.item === 'pipe' && /^SUS$/i.test(String(q.d || '').trim()))) {
         var su = (m && m.sizes && m.sizes.Su || []).filter(function (z) { return z.n === sz.n; })[0];
@@ -1872,22 +1732,24 @@
     if (conv) ref.aa = conv;
     if (q.item === 'box' && sz.box) {
       var five = q.five != null ? !!q.five : UA.isFiveSided(q.d || '');
-      var area = UA.boxArea(sz.box, five);
+      var bk = m && m.output && m.output.boxFactor;
+      if (!(bk > 0)) return noPrice('設定マスタ（M_出力設定）に「BOXの面積の割増」がありません。設定マスタを読み直してください');
+      var area = UA.boxArea(sz.box, five, bk);
       var ex = formula ? '(' + formula.slice(1) + ')' : String(p);
       formula = '=ROUNDUP(' + ex + '*' + area + ',-1)';
       p = roundVal(p * area, 'up10');
-      ref.y += ' ×面積' + area + '㎡（' + (five ? '5面' : '6面') + '×1.1）';
+      ref.y += ' ×面積' + area + '㎡（' + (five ? '5面' : '6面') + '×' + bk + '）';
       ref.aa = sz.text + '（' + area + '㎡・' + (five ? '5面' : '6面') + '）';
     } else if (q.item === 'rect' && sz.wh) ref.aa = '（㎡単価）' + sz.text;
     return { p: p, formula: formula, ref: ref, via: 'sk', approx: r.approx, id: r.id };
-    function noPrice(why) { return { p: null, why: why, ref: { y: '単価なし：' + why, z: '', aa: boxRefAA(q, sz) || sizeLabel(q.item, sz), ab: q.f ? q.f + 'mm' : '' } }; }
+    function noPrice(why) { return { p: null, why: why, ref: { y: '単価なし：' + why, z: '', aa: boxRefAA(q, sz, m) || sizeLabel(q.item, sz), ab: q.f ? q.f + 'mm' : '' } }; }
   };
   // BOX の参照サイズ（AA列）：3辺・面積・面の数。単価が無いときも同じ書き方にして、
   // 厚みを直したときに3辺から入れ直せるようにする（E列に一部の辺だけ出していても）
-  function boxRefAA(q, sz) {
+  function boxRefAA(q, sz, m) {
     if (q.item !== 'box' || !sz || !sz.box) return null;
     var five = q.five != null ? !!q.five : UA.isFiveSided(q.d || '');
-    return sz.text + '（' + UA.boxArea(sz.box, five) + '㎡・' + (five ? '5面' : '6面') + '）';
+    return sz.text + '（' + UA.boxArea(sz.box, five, m && m.output && m.output.boxFactor) + '㎡・' + (five ? '5面' : '6面') + '）';
   }
   function ruleLine(sk, m, rules, q, help, depth, rule) {
     var baseItem = rule.base === 'kind' ? q.item : (q.item === 'round' || q.item === 'rect' || q.item === 'box' ? 'round' : 'pipe');
@@ -1902,7 +1764,7 @@
       var bp = UA.priceLine(sk, m, rules, bq, help, depth + 1);
       if (bp.p == null) {
         var why = '計算ルール「' + rule.name + '」の基準（' + baseName + ' ' + sizeLabel(baseItem, q.sz) + (q.f ? ' ' + q.f + 'mm' : '') + '）の単価がありません';
-        return { p: null, why: why, ref: { y: '単価なし：' + why + (bp.why ? '（' + bp.why + '）' : ''), z: '', aa: boxRefAA(q, q.sz) || sizeLabel(q.item, q.sz), ab: q.f ? q.f + 'mm' : '' } };
+        return { p: null, why: why, ref: { y: '単価なし：' + why + (bp.why ? '（' + bp.why + '）' : ''), z: '', aa: boxRefAA(q, q.sz, m) || sizeLabel(q.item, q.sz), ab: q.f ? q.f + 'mm' : '' } };
       }
       expr = bp.formula ? '(' + bp.formula.slice(1) + ')' : String(bp.p); val = bp.p;
       from = baseName + '＝' + (bp.ref && bp.ref.y ? bp.ref.y.replace(/^単価なし：/, '') : '') + '（' + yen(bp.p) + '円）';
@@ -2079,10 +1941,11 @@
   };
 
   /* ---------- 経費 ---------- */
+  // 経費の率は設定マスタの M_経費 だけに持つ（公開するプログラムには入れない）
   UA.EXPENSE_DEFAULT = {
-    transport: { on: true, label: '資材運搬交通費', k: 0.05, l: -3 },
-    misc: { on: true, label: '諸経費', k: 0.12, l: -3 },
-    welfare: { on: true, label: '法定福利費', k: 0.55, l: 0.15188 }
+    transport: { on: false, label: '資材運搬交通費', k: '', l: '' },
+    misc: { on: false, label: '諸経費', k: '', l: '' },
+    welfare: { on: false, label: '法定福利費', k: '', l: '' }
   };
   var EXP_KEYS = ['transport', 'misc', 'welfare'];
   UA.EXP_KEYS = EXP_KEYS;
@@ -2114,8 +1977,11 @@
       }
       if (trimAll(lb) === '合計' && !info.total) info.total = r;
       if (info.exp && r > info.exp && !info.total) {
-        var c = v(r, C.C);
-        EXP_KEYS.forEach(function (key) { if (!info.items[key] && !isEmpty(c) && expMatch(key, c)) info.items[key] = r; });
+        // 項目名は C列（このアドインが書く列）。前の見積書では B列・D列に書いたものもあるので、そこも見る
+        [C.C, C.B, C.D].forEach(function (cc) {
+          var c = v(r, cc);
+          EXP_KEYS.forEach(function (key) { if (!info.items[key] && !isEmpty(c) && typeof c === 'string' && expMatch(key, c)) info.items[key] = r; });
+        });
       }
     }
     return info;
@@ -2129,6 +1995,8 @@
     function v(r, c) { var row = g.v[r - 1]; var x = row ? row[c] : ''; return x == null ? '' : x; }
     // K〜M列（手計算・メモ）に何か入っている行も使わない（上書きしないように）
     function blankRow(r) { for (var c = 0; c <= 12; c++) if (c !== C.J && !isEmpty(v(r, c))) return false; return true; }
+    // 合計を作るときに使う空き行：J列が =SUM の行（ラベルの無い計）は使わない
+    function freeRow(r) { var fx = g.f && g.f[r - 1] ? g.f[r - 1][C.J] : ''; return blankRow(r) && !(typeof fx === 'string' && /^=\s*SUM\(/i.test(fx)); }
     var zaiko = opt.mode ? opt.mode === 'zaiko' : info.zaiko;
     var laborExpr = null, laborNote = '';
     if (zaiko) {
@@ -2138,8 +2006,11 @@
       else { laborExpr = 'J' + W; laborNote = '労務費の計が見つからないため、工事金額（J' + W + '）を使います'; res.warn = laborNote; }
     }
     var keys = EXP_KEYS.filter(function (k) { return cfg[k] && cfg[k].on; });
-    if (!keys.length) { res.message = '入れる経費の項目がありません'; return res; }
+    if (!keys.length) { res.message = '入れる経費の項目がありません（率は設定マスタの M_経費 から読みます。設定マスタを読み直してください）'; return res; }
     var rows = {}, ins = [], P = null, head = null;
+    // 合計：経費の下に「合計」が無ければ、斜線の行・合計の行・空き行を作る（opt.total === false のときは作らない）。
+    // 合計が既にあれば、その式（=SUM(J工事費計:J合計の1行上)）を経費まで含むように直す
+    var hasT = !!(info.total && info.total > W), addT = opt.total !== false && !hasT, diag = null, T = null;
     if (info.exp && info.exp > W) {
       // 「経費」の見出しがある：同じ項目の行は書き直し、無い項目は最後の項目の下に入れる
       head = info.exp;
@@ -2147,7 +2018,14 @@
       EXP_KEYS.forEach(function (k) { if (info.items[k]) last = Math.max(last, info.items[k]); });
       var add = keys.filter(function (k) { return !info.items[k]; });
       keys.forEach(function (k) { if (info.items[k]) rows[k] = info.items[k]; });
-      if (add.length) {
+      if (addT) {
+        // 足す項目＋斜線の行・合計・空き行のぶん、空き行を使い、足りなければ行を入れる
+        var needU = add.length + 3, freeU = 0;
+        while (freeU < needU && freeRow(last + 1 + freeU)) freeU++;
+        if (freeU < needU) ins.push({ at: last + 1 + freeU, n: needU - freeU });
+        add.forEach(function (k, i) { rows[k] = last + 1 + i; });
+        diag = last + 1 + add.length; T = diag + 1;
+      } else if (add.length) {
         var free = 0; while (free < add.length && blankRow(last + 1 + free) && v(last + 1 + free, C.I) === '') free++;
         // 空き行は使うが、合計の前の空き行1行は残す
         var useFree = Math.max(0, Math.min(free, add.length) - (free >= add.length + 1 ? 0 : 1));
@@ -2158,13 +2036,14 @@
       }
       res.mode = 'update';
     } else {
-      // 工事費計の下に「空き行・経費・項目・空き行」を作る
+      // 工事費計の下に「空き行・経費・項目・空き行」を作る（合計を作るときは「空き行・経費・項目・斜線の行・合計・空き行」）
       P = W + 1;
-      var needN = 2 + keys.length + 1, b = 0;
-      while (b < needN && blankRow(P + b)) b++;
+      var needN = 2 + keys.length + (addT ? 3 : 1), b = 0;
+      while (b < needN && (addT ? freeRow(P + b) : blankRow(P + b))) b++;
       if (b < needN) ins.push({ at: P + b, n: needN - b });
       head = P + 1;
       keys.forEach(function (k, i) { rows[k] = head + 1 + i; });
+      if (addT) { diag = head + 1 + keys.length; T = diag + 1; }
       res.mode = 'new';
     }
     var writes = [];
@@ -2184,8 +2063,28 @@
       }
       writes.push({ r: r, col: 'J', v: '=M' + r });
     });
+    var lastItem = Math.max.apply(null, keys.map(function (k) { return rows[k]; }));
+    res.total = null;
+    if (addT) {
+      writes.push({ r: diag, col: 'J', v: '', diag: true }, { r: T, col: 'I', v: '合計', align: 'Right' }, { r: T, col: 'J', v: '=SUM(J' + W + ':J' + diag + ')' });
+      res.total = { mode: 'new', row: T, formula: '=SUM(J' + W + ':J' + diag + ')' };
+    } else if (hasT && opt.total !== false) {
+      // 行を入れると合計の行は下へずれる。式が「=SUM(J工事費計:J…)」の形なら、経費まで含むように書き直す
+      var T1 = info.total; ins.forEach(function (x) { if (x.at <= T1) T1 += x.n; });
+      var tf = String((g.f && g.f[info.total - 1] && g.f[info.total - 1][C.J]) || '').replace(/[\s$]/g, '');
+      var mm = tf.match(/^=SUM\(J(\d+):J(\d+)\)$/i);
+      if (mm && +mm[1] === W) {
+        var want = '=SUM(J' + W + ':J' + (T1 - 1) + ')';
+        // 行を入れたときは Excel が式の範囲を広げることがある。広がっていても同じ式を書くので問題ない
+        writes.push({ r: T1, col: 'J', v: want });
+        res.total = { mode: 'fix', row: T1, formula: want };
+      } else {
+        res.total = { mode: 'keep', row: T1, formula: tf };
+        res.warn = (res.warn ? res.warn + '。' : '') + T1 + '行目の合計の式（' + (tf || '空欄') + '）はそのままです。経費が入っているか確かめてください';
+      }
+    }
     res.ok = true; res.base = W; res.zaiko = zaiko; res.laborNote = laborNote; res.ins = ins; res.writes = writes; res.rows = rows; res.head = head;
-    res.select = Math.max.apply(null, keys.map(function (k) { return rows[k]; })) + 1;
+    res.select = (res.total && res.total.mode === 'new' ? T : lastItem) + 1;
     return res;
   };
   // 経費の金額の見込み（画面の表示用）
@@ -2195,7 +2094,8 @@
      すぐ下が計の行なら、計の範囲に入るように塊の中に1行入れる。それ以外は「エルボ・空き行」の2行ぶん空ける */
   UA.elbowPlan = function (sc, g, R, opt) {
     opt = opt || {};
-    var rate = num(opt.rate) || 0.35, label = opt.label || 'エルボ', res = { ok: false };
+    var rate = num(opt.rate), label = opt.label || 'エルボ', res = { ok: false };
+    if (!(rate > 0)) { res.message = '設定マスタ（M_出力設定）に「エルボの率」がありません。設定マスタを読み直してください'; return res; }
     function v(r, c) { var row = g.v[r - 1]; var x = row ? row[c] : ''; return x == null ? '' : x; }
     function blankRow(r) { for (var c = 0; c <= 11; c++) if (c !== C.J && !isEmpty(v(r, c))) return false; return true; }
     if (!sc || !R) { res.message = '内訳で行を選んでください'; return res; }
@@ -2246,6 +2146,126 @@
     if (k === 'welfare') return zaiko ? roundVal(labor * num(c.l), 'up10') : roundVal(base * num(c.k) * num(c.l), 'up10');
     var d = -num(c.l), p = Math.pow(10, d > 0 ? d : 0);
     return Math.ceil(base * num(c.k) / p - 1e-9) * p;
+  };
+
+  /* ---------- 見積条件 ----------
+     内訳の最後（合計・出精値引きの下）に、A列「見積条件」の見出しと「一、…」の行を書く。
+     2行以上の条件は、2行目から B列に書く（今の見積書の書き方）。※ で始まる注記は「一、」を付けない */
+  function condClean(t) {
+    return String(t == null ? '' : t).replace(/\r\n?/g, '\n').split('\n').map(function (x) { return x.replace(/^[\s　]+|[\s　]+$/g, ''); }).filter(Boolean).join('\n');
+  }
+  UA.condClean = condClean;
+  var COND_HEAD = /^[\s　]*一[\s　]*[、，,．.][\s　]*|^[\s　]*一[\s　]+/;
+  // 画面・書き込み用の行（1行目に「一、」を付ける）
+  UA.condLines = function (text) {
+    var ls = condClean(text).split('\n').filter(Boolean);
+    if (!ls.length) return [];
+    if (!/^[※＊*]/.test(ls[0])) ls[0] = '一、' + ls[0].replace(COND_HEAD, '');
+    // = + - @ で始まると Excel が式として読むので、文字として入れる
+    return ls.map(function (x) { return /^[=+\-@]/.test(x) ? "'" + x : x; });
+  };
+  // 同じ条件かどうかを見るための鍵（「一、」・空白・改行・最後の「。」を除く）
+  UA.condKey = function (text) {
+    return nfkc(String(text == null ? '' : text)).replace(/^[\s　]*一[\s　]*[、,.][\s　]*|^[\s　]*一[\s　]+/, '').replace(/[\s　]+/g, '').replace(/[。.]+$/, '');
+  };
+  // 内訳シートの見積条件：見出しの行・入っている条件・書き足す位置
+  UA.condInfo = function (g, startRow) {
+    function v(r, c) { var row = g.v[r - 1]; var x = row ? row[c] : ''; return x == null ? '' : x; }
+    function txt(r, c) { var x = v(r, c); return isEmpty(x) ? '' : String(x).trim(); }
+    function blank(r) { for (var c = 0; c <= C.I; c++) if (!isEmpty(v(r, c))) return false; return true; }
+    var n = g.v.length, s0 = startRow || TOP + 1, info = { head: null, items: [], runEnd: null, last: null, total: null };
+    for (var r = s0; r <= n; r++) {
+      if (blank(r)) continue;
+      info.last = r;
+      if (!info.head && trimAll(v(r, C.A)) === '見積条件') info.head = r;
+      var lb = trimAll(v(r, C.I));
+      if (!info.head && (lb === '合計' || lb === '総合計' || /^出精値引/.test(lb))) info.total = r;
+    }
+    if (info.head) {
+      var cur = null, seenNote = false;
+      info.runEnd = info.head;
+      for (var r2 = info.head + 1; r2 <= n; r2++) {
+        if (blank(r2)) { cur = null; continue; }
+        var a2 = txt(r2, C.A), b2 = txt(r2, C.B);
+        if (a2 && /^(一|[※＊*])/.test(a2)) {
+          cur = { r: r2, end: r2, lines: [a2], note: /^[※＊*]/.test(a2) };
+          info.items.push(cur);
+          if (cur.note) seenNote = true; else if (!seenNote) info.runEnd = r2;
+          continue;
+        }
+        // 続きの行：B列に書いたもの、または A列に空白を先に入れて字下げしたもの
+        var rawA = v(r2, C.A), indentA = !!a2 && typeof rawA === 'string' && /^[\s　]/.test(rawA);
+        if (cur && ((!a2 && b2) || indentA)) { cur.lines.push(a2 || b2); cur.end = r2; if (!cur.note && !seenNote) info.runEnd = r2; continue; }
+        if (a2) break;   // ほかの見出し
+        cur = null;
+      }
+      info.items.forEach(function (it) { it.text = it.lines.join('\n'); it.key = UA.condKey(it.lines.join('')); });
+    }
+    return info;
+  };
+  // texts：入れたい条件（シートに同じ条件があるものは入れない）
+  // 戻り値 { ok, message, mode:'new'|'add', head, at, ins:[{at,n}]（元の行番号の位置に入れる行。下から入れる）, writes, n（条件の数）, lines（行数）, skipped, select }
+  // 「一、」の条件は今ある「一、」の最後の下に、※の注記は今ある注記の最後の下に（注記がまだ無ければ、空き行を1行あけて「一、」の下に）
+  UA.condPlan = function (g, texts, opt) {
+    opt = opt || {};
+    var info = UA.condInfo(g, opt.startRow), res = { ok: false, info: info };
+    function v(r, c) { var row = g.v[r - 1]; var x = row ? row[c] : ''; return x == null ? '' : x; }
+    function blank(r) { for (var c = 0; c <= C.I; c++) if (!isEmpty(v(r, c))) return false; return true; }
+    var have = {}, seen = {}, items = [], notes = [];
+    info.items.forEach(function (it) { have[it.key] = true; });
+    (texts || []).forEach(function (t) {
+      var k = UA.condKey(t);
+      if (!k || have[k] || seen[k]) return;
+      seen[k] = true;
+      var ls = UA.condLines(t);
+      (/^[※＊*]/.test(ls[0]) ? notes : items).push(ls);
+    });
+    var nC = items.length + notes.length;
+    res.skipped = (texts || []).length - nC;
+    if (!nC) { res.message = (texts || []).length ? '選んだ条件は、すべてシートに入っています' : '入れる見積条件を選んでください'; return res; }
+    function flat(list) { var out = []; list.forEach(function (ls) { ls.forEach(function (t, i) { out.push({ col: i ? 'B' : 'A', v: t }); }); }); return out; }
+    // after の行の下に lines を置く：空き行を使い、足りなければ行を入れる（下に何かあれば空き行を1行残す）
+    function seg(after, lines) {
+      var need = lines.length, avail = 0;
+      while (avail < need + 1 && blank(after + 1 + avail)) avail++;
+      var below = false;
+      for (var rb = after + 1 + avail; rb <= g.v.length; rb++) if (!blank(rb)) { below = true; break; }
+      var usable = below ? Math.min(need, Math.max(0, avail - 1)) : need;
+      return { after: after, lines: lines, block: usable < need ? { at: after + 1 + usable, n: need - usable } : null };
+    }
+    var iL = flat(items), nL = flat(notes), segs = [], writes = [];
+    if (info.head) {
+      res.mode = 'add'; res.head = info.head;
+      var noteEnd = 0; info.items.forEach(function (it) { if (it.note) noteEnd = Math.max(noteEnd, it.end); });
+      if (nL.length && noteEnd) {
+        if (iL.length) segs.push(seg(info.runEnd, iL));
+        segs.push(seg(noteEnd, nL));
+      } else {
+        var all = iL.slice();
+        if (nL.length) { if (all.length || info.items.length) all.push(null); all = all.concat(nL); }
+        segs.push(seg(info.runEnd, all));
+      }
+    } else {
+      // 見出しが無い：内訳のいちばん下（合計・出精値引きなど）の下に、空き行を1行あけて見出しを作る
+      if (!info.last) { res.message = '内訳に何も入っていません'; return res; }
+      res.mode = 'new'; res.head = info.last + 2;
+      writes.push({ r: res.head, col: 'A', v: '見積条件' });
+      var all2 = iL.slice();
+      if (nL.length) { if (all2.length) all2.push(null); all2 = all2.concat(nL); }
+      segs.push({ after: res.head, lines: all2, block: null });
+      if (!info.total) res.warn = '合計の行がまだありません。' + info.last + '行目の下に入れます';
+    }
+    // 書く位置（行を入れたあとの行番号）。上の段で入れた行のぶん、下の段はずれる
+    var shift = 0, lastR = 0;
+    segs.forEach(function (sg) {
+      var r0 = sg.after + 1 + shift;
+      if (res.at == null) res.at = r0;
+      sg.lines.forEach(function (w, i) { if (w) { writes.push({ r: r0 + i, col: w.col, v: w.v }); lastR = r0 + i; } });
+      if (sg.block) shift += sg.block.n;
+    });
+    res.ok = true; res.ins = segs.map(function (sg) { return sg.block; }).filter(Boolean);
+    res.writes = writes; res.n = nC; res.lines = iL.length + nL.length; res.select = 'A' + (lastR + 1);
+    return res;
   };
 
   /* ---------- 仕様の行を書き込む計画（入力フォーム） ----------

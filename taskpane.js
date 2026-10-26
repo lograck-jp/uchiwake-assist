@@ -5,16 +5,17 @@
  *  - 自動入力：内訳の E列にサイズを打つと、保温厚・単位・単価（参照元は Y〜AB列）を入れる
  *  - 選択行に単価：選んでいる行（離れた範囲も可）の単価を入れ直す
  *  - 計・経費：A/B/C列 集計・小計・工事費計・合計・出精値引き・経費
- *  - 単価ルール：直管×係数で出す単価（GV 50A以下＝×1.1 など）を画面で追加・編集
+ *  - 単価ルール：直管×係数で出す単価を画面で追加・編集（既定は設定マスタ M_単価計算）
+ *  - 率・係数・対応表などの数字はプログラムに持たず、利用者のパソコンの設定マスタから読む
  */
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.12';
+  var VERSION = '2.0.14';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
-  var TAB = { input: '入力', total: '計・経費', rules: '単価ルール' };
+  var TAB = { input: '入力', total: '計・経費', cond: '見積条件', rules: '単価ルール' };
 
   var st = {
     master: null, masterInfo: null, sk: null, skInfo: null, specLocal: { add: [], hide: {}, pin: {} }, siteType: '',
@@ -25,6 +26,7 @@
     auto: { on: true, log: [] },
     rules: null, rulesLocal: false,
     exp: { cfg: null, mode: 'auto', baseRow: '' },
+    cond: { on: {}, edit: {}, extra: [], editing: null, newText: '' },
     ui: { menu: false, busy: false, toast: null, composing: false, specEditMode: false, specEdit: null, showHidden: false, newSpec: '', newCat: '', newPlace: 'here',
       specIdx: [], showAll: false, full: true, discount: '', hover: '', ruleEdit: null, anim: '' },
     undo: null, api19: false, api17: false, autoOpen: false
@@ -62,6 +64,7 @@
     var ui = load(K_UI); if (ui) { if (ui.auto === false) st.auto.on = false; if (ui.full === false) st.ui.full = false; if (TAB[ui.tab]) st.tab = ui.tab; }
     var rl = load(K_RULES); if (rl && rl.rules) { st.rules = rl.rules; st.rulesLocal = true; }
     loadExpCfg();
+    var cd = docGet('uchiwake.conds'); if (cd) { st.cond.on = cd.on || {}; st.cond.edit = cd.edit || {}; st.cond.extra = cd.extra || []; }
     bindEvents();
     $('#masterFile').addEventListener('change', onMasterFile);
     $('#skFile').addEventListener('change', onSkFile);
@@ -78,6 +81,7 @@
   function setMaster(m, info, persist) {
     st.master = UA.indexMaster(m);
     st.masterInfo = info;
+    if (st.exp) loadExpCfg();
     if (persist) {
       var copy = Object.assign({}, m); delete copy.priceIdx; delete copy.specCount; delete copy.thickIdx; delete copy.kindById; delete copy.skRules; delete copy.skAdj;
       if (!save(K_MASTER, { master: copy, info: info })) toast('マスタをこのパソコンに記憶できませんでした（容量不足の可能性）。表示中は使えます。', 'warn');
@@ -131,6 +135,9 @@
   function saveRules(list) { st.rules = list; st.rulesLocal = true; if (!save(K_RULES, { rules: list, at: U.today() })) toast('ルールをこのパソコンに記憶できませんでした', 'warn'); }
   function loadExpCfg() {
     var base = JSON.parse(JSON.stringify(UA.EXPENSE_DEFAULT));
+    // 率は設定マスタ（M_経費）→ このパソコンで「既定にする」で記憶した率 → この見積書で直した率 の順に上書き
+    var mx = st.master && st.master.expenseRaw;
+    if (mx) UA.EXP_KEYS.forEach(function (k) { if (mx[k]) base[k] = Object.assign(base[k], mx[k]); });
     var def = load(K_EXP); if (def && def.cfg) UA.EXP_KEYS.forEach(function (k) { if (def.cfg[k]) base[k] = Object.assign(base[k], def.cfg[k]); });
     var doc = docGet('uchiwake.expense');
     if (doc && doc.cfg) UA.EXP_KEYS.forEach(function (k) { if (doc.cfg[k]) base[k] = Object.assign(base[k], doc.cfg[k]); });
@@ -398,7 +405,7 @@
   function runElbow(kind) {
     var o = st.master && st.master.output || {};
     var lb = kind === 'MD継手' ? 'MD継手' : (o.elbowLabel || 'エルボ');
-    var p = UA.elbowPlan(st.sc, st.grid, targetRow(), { rate: o.elbowRate || 0.35, label: lb });
+    var p = UA.elbowPlan(st.sc, st.grid, targetRow(), { rate: o.elbowRate, label: lb });
     if (!p.ok) { toast(p.message, 'warn'); render(); return; }
     var writes = p.writes.slice(), jf = ((st.grid.f[p.at - 1] || [])[9]);
     if (!p.ins && U.isEmpty(jf)) writes.push({ r: p.at, col: 'J', v: jTpl(p.at) });
@@ -428,18 +435,27 @@
     for (var r = st.grid.v.length; r > startRowOf(); r--) { var row = st.grid.v[r - 1]; if (row && row.slice(0, 9).every(U.isEmpty)) return r; }
     return null;
   }
-  function fmtSrc(fr, ins) {
+  function fmtSrc(fr, blocks) {
     if (fmtExists) return "'" + FMT_SHEET + "'!A" + FMT_ROW + ':J' + FMT_ROW;
     if (!fr) return null;
-    var r = fr >= ins.at ? fr + ins.n : fr;   // 挿入でずれた位置
+    var r = fr; blocks.forEach(function (b) { if (fr >= b.at) r += b.n; });   // 挿入でずれた位置
     return 'A' + r + ':J' + r;
+  }
+  // plan.ins：{at,n} か [{at,n}, ...]。at は「元の行番号」（その行の上に n 行入れる）。書き込む行（writes の r）は入れたあとの行番号
+  function insBlocks(ins) {
+    var list = (Array.isArray(ins) ? ins : (ins ? [ins] : [])).filter(function (b) { return b && b.n > 0; }).map(function (b) { return { at: b.at, n: b.n }; });
+    list.sort(function (a, b) { return a.at - b.at; });
+    var off = 0;
+    list.forEach(function (b) { b.s = b.at + off; off += b.n; });   // s＝入れたあとの最初の行
+    return list;
   }
   function applyPlan(plan, doneText) {
     if (st.ui.busy) return Promise.resolve(false);
     if (!st.headerOK) { toast('書き込み先が内訳シートではないようです（1行目に「保温厚」の見出しがありません）', 'err'); render(); return Promise.resolve(false); }
     st.ui.busy = true; render();
-    var target = st.target, ins = plan.ins && plan.ins.n > 0 ? plan.ins : null;
-    function orig(r) { return !ins || r < ins.at ? r : (r < ins.at + ins.n ? null : r - ins.n); }
+    var target = st.target, blocks = insBlocks(plan.ins), ins = blocks.length ? blocks : null;
+    // 入れたあとの行番号 → 元の行番号（入れた行なら null）
+    function orig(r) { var off = 0; for (var i = 0; i < blocks.length; i++) { var b = blocks[i]; if (r < b.s) break; if (r < b.s + b.n) return null; off += b.n; } return r - off; }
     var undo = { sheet: target, cells: [], diags: [], ins: ins, kind: 'plan' };
     var until = Date.now() + 4000;
     plan.writes.forEach(function (w) { own.addrs[w.col + w.r] = until; });
@@ -464,22 +480,26 @@
         }
         return ctx.sync().then(function () { return srcRg ? srcRg.format.rowHeight : null; });
       }).then(function (rowH) {
-        var src = ins && st.api19 ? fmtSrc(blankTemplateRow(), ins) : null;
+        var src = ins && st.api19 ? fmtSrc(blankTemplateRow(), blocks) : null;
         before.forEach(function (x) {
           if (!x) return;
           undo.cells.push({ addr: x.w.col + x.o, v: x.c.formulas[0][0] });
           if (x.b) undo.diags.push({ addr: x.w.col + x.o, style: x.b.style });
         });
         if (ins) {
-          own.struct = until; ws.getRange(ins.at + ':' + (ins.at + ins.n - 1)).insert('Down');
+          own.struct = until;
+          // 下の位置から入れる（上の位置の行番号がずれないように）
+          blocks.slice().reverse().forEach(function (b) { ws.getRange(b.at + ':' + (b.at + b.n - 1)).insert('Down'); });
           // 挿入した行：A〜J列を内訳の初めの書式にし、J列に金額式を入れる（このあと書く行は上書き）
-          for (var ir = ins.at; ir < ins.at + ins.n; ir++) {
-            var dst = ws.getRange('A' + ir + ':J' + ir);
-            if (src) dst.copyFrom(src, 'Formats');
-            ws.getRange('J' + ir).formulas = [[jTpl(ir)]];
-            own.addrs['J' + ir] = until;
-          }
-          if (rowH) ws.getRange(ins.at + ':' + (ins.at + ins.n - 1)).format.rowHeight = rowH;
+          blocks.forEach(function (b) {
+            for (var ir = b.s; ir < b.s + b.n; ir++) {
+              var dst = ws.getRange('A' + ir + ':J' + ir);
+              if (src) dst.copyFrom(src, 'Formats');
+              ws.getRange('J' + ir).formulas = [[jTpl(ir)]];
+              own.addrs['J' + ir] = until;
+            }
+            if (rowH) ws.getRange(b.s + ':' + (b.s + b.n - 1)).format.rowHeight = rowH;
+          });
         }
         plan.writes.forEach(function (w) {
           var c = ws.getRange(w.col + w.r);
@@ -512,7 +532,8 @@
     own.allUntil = Date.now() + 60000; own.struct = Date.now() + 4000;
     Excel.run(function (ctx) {
       var ws = ctx.workbook.worksheets.getItem(u.sheet);
-      if (u.ins) ws.getRange(u.ins.at + ':' + (u.ins.at + u.ins.n - 1)).delete('Up');
+      // 入れた行を下から消す（s＝入れたあとの行番号）
+      if (u.ins) (Array.isArray(u.ins) ? u.ins : [{ s: u.ins.at, n: u.ins.n }]).slice().reverse().forEach(function (b) { ws.getRange(b.s + ':' + (b.s + b.n - 1)).delete('Up'); });
       return ctx.sync().then(function () {
         u.cells.slice().reverse().forEach(function (c) { ws.getRange(c.addr).formulas = [[c.v == null ? '' : c.v]]; });
         (u.diags || []).forEach(function (d) { ws.getRange(d.addr).format.borders.getItem('DiagonalUp').style = d.style || 'None'; });
@@ -590,7 +611,7 @@
         if (!(ww > 0 && hh > 0 && ll > 0)) return;
         var sz = { box: { w: ww, d: ll, h: hh }, text: 'W' + ww + '×H' + hh + '×L' + ll };
         var p = UA.priceLine(st.sk, st.master, rules(), { item: 'box', d: name, five: five, place: w.place, spec: xx.spec, sz: sz, f: fb }, null);
-        var area = UA.boxArea(sz.box, five);
+        var area = UA.boxArea(sz.box, five, st.master.output && st.master.output.boxFactor);
         // AA列には3辺と面積を残す（E列に一部の辺しか出さなくても、単価を入れ直せるように）
         if (p.ref) p.ref = Object.assign({}, p.ref, { aa: sz.text + '（' + area + '㎡・' + (five ? '5面' : '6面') + '）' });
         out.lines.push({ d: '', e: (bx.show.w || bx.show.h || bx.show.l) ? (boxText(b, bx) || sz.text) : '', f: fb, g: n, h: '台', pr: p, area: area });
@@ -718,8 +739,10 @@
     });
     h += '</div>';
     var where = plan && plan.ok ? (plan.mode === 'update' ? '「経費」（' + info.exp + '行目）の項目を書き直します' : plan.head + '行目に「経費」を作ります（' + (plan.ins.length ? '行を入れます' : '空き行を使います') + '）') : (plan ? plan.message : '');
-    h += '<div class="hint">' + esc(where) + '。K・L・M列に率と式、J列は =M列 にします</div>';
-    h += '<div class="row"><button type="button" class="ghost sm" data-act="expDefault" title="今の率を、ほかの見積書でも使う既定にします">この率を既定にする</button><button type="button" class="cta mid" data-act="expRun"' + (plan && plan.ok && !st.ui.busy ? '' : ' disabled') + '>経費を入れる</button></div>';
+    var tHint = plan && plan.ok && plan.total ? (plan.total.mode === 'new' ? '。その下の ' + plan.total.row + '行目に「合計」（' + plan.total.formula + '）も入れます' :
+      plan.total.mode === 'fix' ? '。合計（' + plan.total.row + '行目）は ' + plan.total.formula + ' にします' : '。' + plan.warn) : '';
+    h += '<div class="hint">' + esc(where + tHint) + '。K・L・M列に率と式、J列は =M列 にします</div>';
+    h += '<div class="row"><button type="button" class="ghost sm" data-act="expDefault" title="今の率を、ほかの見積書でも使う既定にします">この率を既定にする</button><button type="button" class="cta mid" data-act="expRun"' + (plan && plan.ok && !st.ui.busy ? '' : ' disabled') + '>' + (plan && plan.ok && plan.total && plan.total.mode === 'new' ? '経費と合計を入れる' : '経費を入れる') + '</button></div>';
     return h + '</section>';
   }
   function runExpense() {
@@ -727,9 +750,10 @@
     var zaiko = st.exp.mode === 'auto' ? info.zaiko : st.exp.mode === 'zaiko';
     var p = UA.expensePlan(st.grid, st.exp.cfg, { mode: zaiko ? 'zaiko' : 'kyokai' });
     if (!p.ok) { toast(p.message, 'warn'); render(); return; }
-    var writes = p.writes.map(function (w) { var o = { r: w.r, col: w.col, v: w.v }; if (w.col === 'M') o.fmt = '#,##0'; return o; });
-    applyPlan({ ins: p.ins.length ? p.ins[0] : null, writes: writes, select: 'A' + p.select },
-      '経費を入れました（' + (p.zaiko ? '材工の見積' : '協会単価の見積') + '、工事金額 J' + p.base + '）' + (p.warn ? '。' + p.warn : '')).then(render);
+    var writes = p.writes.map(function (w) { var o = { r: w.r, col: w.col, v: w.v }; if (w.col === 'M') o.fmt = '#,##0'; if (w.diag) o.diag = true; if (w.align) o.align = w.align; return o; });
+    var tt = p.total ? (p.total.mode === 'new' ? '、' + p.total.row + '行目に合計' : p.total.mode === 'fix' ? '、合計（' + p.total.row + '行目）の式を ' + p.total.formula + ' に' : '') : '';
+    applyPlan({ ins: p.ins, writes: writes, select: 'A' + p.select },
+      '経費' + (tt ? 'と合計' : '') + 'を入れました（' + (p.zaiko ? '材工の見積' : '協会単価の見積') + '、工事金額 J' + p.base + tt + '）' + (p.warn ? '。' + p.warn : '')).then(render);
   }
 
   /* ---------- 画面 ---------- */
@@ -788,17 +812,31 @@
     if (st.ui.menu) h.push(menuView());
     h.push(statusView());
     if (!st.master) { h.push(onboard()); h.push(toastView()); return h.join(''); }
+    var miss = masterMissing();
+    if (miss.length) h.push('<div class="mnote">設定マスタを読み直してください。' + esc(miss.join('・')) + ' は設定マスタから読みます（率・係数や見積条件の文章は、プログラムに入れず設定マスタに置いています）。<button type="button" class="link" data-act="loadMaster">読み直す</button></div>');
     h.push('<nav class="tabs" role="tablist">' + Object.keys(TAB).map(function (k) {
       return '<button type="button" role="tab" class="tab' + (st.tab === k ? ' on' : '') + '" data-act="tab" data-v="' + k + '" aria-selected="' + (st.tab === k) + '">' + TAB[k] + '</button>'; }).join('') + '</nav>');
     h.push('<div id="main" class="main">');
     if (!st.model) h.push('<div class="empty">' + (st.modelErr ? esc(st.modelErr) : '「内訳」で始まるシートを開いてください') + '</div>');
     else if (st.tab === 'input') h.push(inputView());
     else if (st.tab === 'total') h.push(totalView());
+    else if (st.tab === 'cond') h.push(condView());
     else h.push(rulesView());
     h.push('</div>');
     h.push(toastView());
     h.push(footView());
     return h.join('');
+  }
+  function masterMissing() {
+    var m = st.master, o = (m && m.output) || {}, out = [];
+    if (!m) return out;
+    if (!(m.skRulesRaw && m.skRulesRaw.length)) out.push('積算資料の対応表');
+    if (!m.calcRulesRaw && !st.rulesLocal) out.push('単価ルール');
+    if (!m.expenseRaw) out.push('経費の率');
+    if (!m.conditions) out.push('見積条件');
+    if (!(o.elbowRate > 0)) out.push('エルボの率');
+    if (!(o.boxFactor > 0)) out.push('BOXの面積の割増');
+    return out;
   }
   function statusView() {
     var bits = [];
@@ -991,7 +1029,7 @@
       h += '<div class="kv"><span>E列に出す辺</span><div class="sides">' + sideBtn('w', 'W') + sideBtn('h', 'H') + sideBtn('l', 'L') +
         '<button type="button" class="sbtn sym' + (bx.sym ? ' on' : '') + '" data-act="bSym" aria-pressed="' + bx.sym + '" title="W500×H1000×L500 のように記号を付けます">記号</button></div></div>';
       h += '<div class="kv"><span>面の数</span><div class="segs">' + [[false, '6面'], [true, '5面']].map(function (x) {
-        return '<button type="button" class="seg' + (ex.five === x[0] ? ' on' : '') + '" data-act="bFive" data-v="' + (x[0] ? '1' : '0') + '">' + x[1] + '</button>'; }).join('') + '</div><span class="hint">面積×1.1。チャンバー・ガラリは5面</span></div>';
+        return '<button type="button" class="seg' + (ex.five === x[0] ? ' on' : '') + '" data-act="bFive" data-v="' + (x[0] ? '1' : '0') + '">' + x[1] + '</button>'; }).join('') + '</div><span class="hint">面積×' + esc(String((st.master.output && st.master.output.boxFactor) || '（設定マスタ）')) + '。チャンバー・ガラリは5面</span></div>';
       h += ductThickChips(bx, 'bF', 'bFx');
       h += '<div class="hint">単価は3辺すべてから計算します（E列に出さない辺も使います）</div>';
       return h;
@@ -1083,10 +1121,110 @@
   function toHalfDigits(t) { return String(t == null ? '' : t).replace(/[０-９]/g, function (c) { return String.fromCharCode(c.charCodeAt(0) - 0xFEE0); }).replace(/[，、]/g, ','); }
   function rowBlank(r) { var row = st.grid.v[r - 1]; if (!row) return true; for (var c = 0; c < 9; c++) if (!U.isEmpty(row[c])) return false; return true; }
 
+  /* ----- 見積条件タブ ----- */
+  // 一覧＝設定マスタ（M_見積条件）の条件＋この見積だけの条件。チェック・文の直し・追加はこの見積書に記憶
+  function condList() {
+    var m = st.master, c = st.cond, out = [], src = ((m && m.conditions) || []).slice(), gi = {};
+    // 分類ごとにまとめる（分類の順は、その分類が最初に出てくる順）。画面の並び＝内訳に入れる順
+    src.forEach(function (x, i) { if (gi[x.cat] == null) gi[x.cat] = i; x._i = i; });
+    src.sort(function (a, b) { return gi[a.cat] - gi[b.cat] || a._i - b._i; });
+    src.forEach(function (x) {
+      var ed = c.edit[x.id];
+      out.push({ id: x.id, text: ed != null ? ed : x.text, base: x.text, cat: x.cat, memo: x.memo, src: 'master', edited: ed != null && ed !== x.text,
+        on: c.on[x.id] != null ? !!c.on[x.id] : !!x.always });
+    });
+    c.extra.forEach(function (x) { out.push({ id: x.id, text: x.text, base: x.text, cat: '', src: 'extra', on: c.on[x.id] != null ? !!c.on[x.id] : true }); });
+    return out;
+  }
+  function saveCond() { docSet('uchiwake.conds', { on: st.cond.on, edit: st.cond.edit, extra: st.cond.extra }); }
+  function condTextHtml(t) {
+    var ls = UA.condLines(t);
+    return ls.map(function (x, i) { x = x.replace(/^'/, ''); return i ? '<span class="c2">' + esc(x) + '</span>' : esc(x); }).join('');
+  }
+  function condView() {
+    var list = condList(), info = st.grid ? UA.condInfo(st.grid, startRowOf()) : null, have = {};
+    (info ? info.items : []).forEach(function (it) { if (!have[it.key]) have[it.key] = it; });
+    var picks = list.filter(function (x) { return x.on && !have[UA.condKey(x.text)]; });
+    var plan = st.grid ? UA.condPlan(st.grid, picks.map(function (x) { return x.text; }), { startRow: startRowOf() }) : null;
+    var h = '<div class="intro">設定マスタの <b>M_見積条件</b> の文章から選んで、内訳のいちばん下（合計の下）の「見積条件」に入れます。チェックと文の直しは、この見積書に記憶します。</div>';
+    if (st.master && !st.master.conditions) h += '<div class="hint warn">設定マスタに M_見積条件 のシートがありません。設定マスタを読み直してください。</div>';
+    // 分類ごと（M_見積条件 の並び順のまま）
+    var groups = [], byCat = {};
+    list.forEach(function (x) {
+      var k = x.src === 'extra' ? '\u0001' : (x.cat || '');
+      if (!byCat[k]) { byCat[k] = { name: x.src === 'extra' ? 'この見積だけの条件' : x.cat, rows: [] }; groups.push(byCat[k]); }
+      byCat[k].rows.push(x);
+    });
+    var ed = st.cond.editing;
+    h += '<div class="cnds">';
+    if (!list.length) h += '<div class="empty sm">条件がありません。設定マスタの M_見積条件 に文章を入れて読み直すか、下の欄から追加してください。</div>';
+    groups.forEach(function (gr) {
+      if (gr.name && groups.length > 1) h += '<div class="slgt">' + esc(gr.name) + '</div>';
+      gr.rows.forEach(function (x) {
+        var hv = have[UA.condKey(x.text)];
+        if (ed && ed.id === x.id) {
+          h += '<div class="cnd edit"><textarea class="in ta" data-f="cond.edit" rows="3" aria-label="見積条件の文">' + esc(ed.text) + '</textarea>' +
+            '<div class="hint">「一、」は自動で付けます。改行した2行目からは B列に書きます。直した文はこの見積書だけで使います' + (x.src === 'master' ? '（設定マスタは変わりません）' : '') + '</div>' +
+            '<div class="row"><button type="button" class="ghost" data-act="condCancel">取消</button>' +
+            (x.src === 'master' && x.edited ? '<button type="button" class="ghost" data-act="condRevert">元の文に戻す</button>' : '') +
+            '<button type="button" class="ghost acc" data-act="condSave">保存</button></div></div>';
+          return;
+        }
+        h += '<div class="cnd' + (hv ? ' have' : x.on ? ' on' : ' off') + '"><label class="cnd-l"><input type="checkbox" data-f="cond.on" data-k="' + esc(x.id) + '"' + (x.on || hv ? ' checked' : '') + (hv ? ' disabled' : '') + '>' +
+          '<span class="cnd-t">' + condTextHtml(x.text) + (x.edited ? '<em class="tg">この見積用に直した文</em>' : '') +
+          (hv ? '<small>シートに入っています（' + hv.r + '行目）</small>' : x.memo ? '<small>' + esc(x.memo) + '</small>' : '') + '</span></label>' +
+          '<div class="cnd-a"><button type="button" class="ic-b" data-act="condEdit" data-v="' + esc(x.id) + '" title="この見積用に文を直す"' + (ed ? ' disabled' : '') + '>✎</button>' +
+          (x.src === 'extra' ? '<button type="button" class="ic-b" data-act="condDel" data-v="' + esc(x.id) + '" title="削除">×</button>' : '') + '</div></div>';
+      });
+    });
+    h += '</div>';
+    h += '<div class="row cnd-tools"><button type="button" class="ghost sm" data-act="condDefault" title="チェックを設定マスタの「いつも入れる」に戻します">チェックを既定に戻す</button><button type="button" class="ghost sm" data-act="condNone">すべて外す</button></div>';
+    // この見積だけの条件
+    h += '<section class="card"><div class="card-h"><b>この見積だけの条件を追加</b><small>「一、」は付けなくてよい</small></div>' +
+      '<textarea class="in ta" data-f="cond.new" rows="2" placeholder="例）屋外の配管は○○仕上げといたしました。" aria-label="追加する見積条件">' + esc(st.cond.newText) + '</textarea>' +
+      '<div class="row"><button type="button" class="ghost acc" data-act="condAdd">＋ 追加</button></div></section>';
+    // 書き込み
+    var where = !plan ? '内訳シートを開いてください' : plan.ok ? (plan.mode === 'new' ? plan.head + '行目に「見積条件」を作り、その下に ' + plan.n + '件入れます' :
+      '「見積条件」（' + plan.head + '行目）の下、' + plan.at + '行目から ' + plan.n + '件足します') + (plan.ins.length ? '（行を入れます）' : '') + (plan.warn ? '。' + plan.warn : '') : plan.message;
+    var nHave = info ? info.items.length : 0;
+    h += '<section class="card"><div class="card-h"><b>内訳に入れる</b><small>' + (info && info.head ? '今の見積条件 ' + nHave + '件（' + info.head + '行目〜）はそのまま' : 'A列に「見積条件」と「一、…」を書きます') + '</small></div>' +
+      '<div class="hint">' + esc(where) + '</div>' +
+      '<button type="button" class="cta" data-act="condRun"' + (plan && plan.ok && !st.ui.busy && !ed ? '' : ' disabled') + '>見積条件を入れる' + (plan && plan.ok ? '（' + plan.n + '件）' : '') + '</button></section>';
+    // シートにだけある条件（設定マスタに足すと次から選べる）
+    var known = {}; list.forEach(function (x) { known[UA.condKey(x.text)] = true; });
+    var only = (info ? info.items : []).filter(function (it) { return !known[it.key]; });
+    var extras = list.filter(function (x) { return x.src === 'extra'; });
+    if (only.length || extras.length) {
+      h += '<section class="card"><div class="card-h"><b>設定マスタに無い条件</b><small>' + (only.length ? 'シートに ' + only.length + '件' : '') + (only.length && extras.length ? '・' : '') + (extras.length ? 'この見積だけ ' + extras.length + '件' : '') + '</small></div>' +
+        '<div class="hint">書き出して設定マスタの M_見積条件 に貼り付けると、次からほかの見積書でも選べます。</div>' +
+        '<div class="row"><button type="button" class="ghost" data-act="condExport">一覧に書き出す</button></div></section>';
+    }
+    return h;
+  }
+  function runCond() {
+    var list = condList().filter(function (x) { return x.on; });
+    var p = UA.condPlan(st.grid, list.map(function (x) { return x.text; }), { startRow: startRowOf() });
+    if (!p.ok) { toast(p.message, 'warn'); render(); return; }
+    var nIns = p.ins.reduce(function (a, b) { return a + b.n; }, 0);
+    applyPlan({ ins: p.ins, writes: p.writes, select: p.select },
+      (nIns ? nIns + '行挿入して、' : '') + (p.mode === 'new' ? p.head + '行目に「見積条件」を作り、' : '') + '見積条件を ' + p.n + '件入れました' +
+      (p.skipped ? '（シートに同じ文がある ' + p.skipped + '件は入れていません）' : '') + (p.warn ? '。' + p.warn : '')).then(render);
+  }
+  function exportConds() {
+    var list = condList(), known = {}, rows = [];
+    list.forEach(function (x) { known[UA.condKey(x.text)] = true; });
+    var info = st.grid ? UA.condInfo(st.grid, startRowOf()) : null;
+    (info ? info.items : []).forEach(function (it) { if (!known[it.key]) { known[it.key] = true; rows.push(['', it.lines.join('\n').replace(/^一[\s　]*[、，,．.][\s　]*/, ''), '', '', '○', st.target + ' の ' + it.r + '行目']); } });
+    list.forEach(function (x) { if (x.src === 'extra' || x.edited) rows.push(['', x.text.replace(/^一[\s　]*[、，,．.][\s　]*/, ''), x.cat || '', '', '○', x.edited ? '「' + x.base.slice(0, 20) + '」を直したもの' : 'この見積だけの条件']); });
+    if (!rows.length) { toast('設定マスタに無い条件はありません', 'info'); render(); return; }
+    exportSheet('内訳アシスト_見積条件', ['表示順', '見積条件', '分類', 'いつも入れる', '使用する', 'メモ'], rows,
+      '「内訳アシスト_見積条件」シートに書き出しました。必要な行を設定マスタの M_見積条件 に貼り付けて、設定マスタを読み直してください。');
+  }
+
   /* ----- 単価ルールタブ ----- */
   function rulesView() {
     var list = rules(), h = '';
-    h += '<div class="intro">協会単価の表に無いもの（GV の小さいサイズ・フレックス継手など）を、同じ仕様の直管の単価から計算します。<b>上のルールから順に</b>当てはめます。自動入力・選択行に単価・入力フォームのすべてで使います。</div>';
+    h += '<div class="intro">協会単価の表に無いものを、基準の単価（同じ仕様の直管など）×係数で計算します（既定は設定マスタの M_単価計算）。<b>上のルールから順に</b>当てはめます。自動入力・選択行に単価・入力フォームのすべてで使います。</div>';
     h += '<div class="rules">' + list.map(function (r, i) {
       if (st.ui.ruleEdit && st.ui.ruleEdit.i === i) return ruleForm(st.ui.ruleEdit);
       var d = UA.describeRule(r, st.master);
@@ -1098,7 +1236,7 @@
         '<button type="button" class="ic-b" data-act="ruleEdit" data-v="' + i + '" title="直す">✎</button></div></div>';
     }).join('') + '</div>';
     if (st.ui.ruleEdit && st.ui.ruleEdit.i === -1) h += '<div class="rules">' + ruleForm(st.ui.ruleEdit) + '</div>';
-    h += '<div class="row"><button type="button" class="ghost acc" data-act="ruleAdd"' + (st.ui.ruleEdit ? ' disabled' : '') + '>＋ ルールを追加</button><button type="button" class="ghost" data-act="ruleReset">初めの設定に戻す</button></div>';
+    h += '<div class="row"><button type="button" class="ghost acc" data-act="ruleAdd"' + (st.ui.ruleEdit ? ' disabled' : '') + '>＋ ルールを追加</button><button type="button" class="ghost" data-act="ruleReset" title="このパソコンで直したルールを捨てて、設定マスタ（M_単価計算）の内容に戻します">設定マスタの内容に戻す</button></div>';
     h += '<div class="hint">' + (st.rulesLocal ? 'このパソコンに記憶しています。メニューの「単価ルールを書き出す」で一覧にでき、設定マスタの M_単価計算 シートに貼るとほかのパソコンでも使えます。' : st.master && st.master.calcRulesRaw && st.master.calcRulesRaw.length ? '設定マスタの M_単価計算 シートのルールです。' : '初めの設定のルールです。') + '</div>';
     return h;
   }
@@ -1308,6 +1446,30 @@
           });
           return;
         }
+        case 'condEdit': { var ce = condList().filter(function (x) { return x.id === v; })[0]; if (ce) st.cond.editing = { id: ce.id, text: ce.text }; break; }
+        case 'condCancel': st.cond.editing = null; break;
+        case 'condRevert': if (st.cond.editing) { delete st.cond.edit[st.cond.editing.id]; saveCond(); } st.cond.editing = null; break;
+        case 'condSave': {
+          var e2 = st.cond.editing; if (!e2) break;
+          var t2 = UA.condClean(e2.text);
+          if (!t2) { toast('文が空です', 'warn'); break; }
+          var x2 = condList().filter(function (x) { return x.id === e2.id; })[0];
+          if (x2 && x2.src === 'extra') st.cond.extra.forEach(function (x) { if (x.id === e2.id) x.text = t2; });
+          else if (x2) { if (t2 === x2.base) delete st.cond.edit[e2.id]; else st.cond.edit[e2.id] = t2; }
+          st.cond.editing = null; saveCond(); break;
+        }
+        case 'condDel': st.cond.extra = st.cond.extra.filter(function (x) { return x.id !== v; }); delete st.cond.on[v]; saveCond(); break;
+        case 'condAdd': {
+          var t3 = UA.condClean(st.cond.newText);
+          if (!t3) { toast('追加する条件の文を入れてください', 'warn'); break; }
+          if (condList().some(function (x) { return UA.condKey(x.text) === UA.condKey(t3); })) { toast('同じ条件が一覧にあります', 'warn'); break; }
+          var nid = 'x' + Date.now();
+          st.cond.extra.push({ id: nid, text: t3 }); st.cond.on[nid] = true; st.cond.newText = ''; saveCond(); break;
+        }
+        case 'condDefault': st.cond.on = {}; saveCond(); break;
+        case 'condNone': condList().forEach(function (x) { st.cond.on[x.id] = false; }); saveCond(); break;
+        case 'condRun': fresh(runCond); return;
+        case 'condExport': exportConds(); return;
         case 'expMode': st.exp.mode = v; docSet('uchiwake.expense', { mode: st.exp.mode, cfg: st.exp.cfg }); break;
         case 'expRun': fresh(runExpense); return;
         case 'expDefault': save(K_EXP, { cfg: st.exp.cfg }); toast('今の率を既定にしました（このパソコン）', 'ok'); break;
@@ -1333,7 +1495,7 @@
           saveRules(l4); st.ui.ruleEdit = null; toast('ルールを保存しました', 'ok');
           break;
         }
-        case 'ruleReset': saveRules(UA.defaultCalcRules()); toast('初めの設定に戻しました', 'ok'); break;
+        case 'ruleReset': saveRules(JSON.parse(JSON.stringify((st.master && st.master.calcRulesRaw) || UA.defaultCalcRules()))); toast((st.master && st.master.calcRulesRaw) ? '設定マスタの内容に戻しました' : '設定マスタに M_単価計算 がありません（設定マスタを読み直してください）', (st.master && st.master.calcRulesRaw) ? 'ok' : 'warn'); break;
         // そのほか
         case 'priceSel': readSelection().then(priceSelected); return;
         case 'elbow': fresh(function () { runElbow(v); }); return;
@@ -1354,6 +1516,7 @@
       if (ff === 'specEditPlace' && st.ui.specEdit) st.ui.specEdit.place = el.value === 'all' ? '（全箇所）' : st.wiz.place;
       if (ff === 'specEditCat' && st.ui.specEdit) st.ui.specEdit.cat = el.value;
       if (ff === 're.round' && st.ui.ruleEdit) { st.ui.ruleEdit.r.round = el.value; render(); }
+      if (ff === 'cond.on') { st.cond.on[el.dataset.k] = el.checked; saveCond(); render(); return; }
       if (ff === 'exp.on') { st.exp.cfg[el.dataset.k].on = el.checked; docSet('uchiwake.expense', { mode: st.exp.mode, cfg: st.exp.cfg }); render(); }
     });
     document.addEventListener('focusout', function () { setTimeout(function () { if (softPending && !isTyping()) render(); }, 0); });
@@ -1378,6 +1541,8 @@
     var f = el.dataset.f, k = el.dataset.k, v = el.value, w = st.wiz;
     if (f === 'target' || el.type === 'checkbox') return;
     if (f === 'specNew') { st.ui.newSpec = v; if (!silent) render(); return; }
+    if (f === 'cond.edit') { if (st.cond.editing) st.cond.editing.text = v; return; }
+    if (f === 'cond.new') { st.cond.newText = v; return; }
     if (f === 'specEditText') { if (st.ui.specEdit) st.ui.specEdit.spec = v; return; }
     if (f === 'specNewPlace' || f === 'specNewCat' || f === 'specEditPlace' || f === 'specEditCat' || f === 're.round') return;
     if (f === 'discount') {
