@@ -5,7 +5,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '1.3.2';
+  var VERSION = '1.3.3';
   var K_MASTER = 'uchiwake-assist.master.v1', K_MEMO = 'uchiwake-assist.pricememo.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1', K_UI = 'uchiwake-assist.ui.v1';
   var HOW_LABEL = { add: '下に追加', merge: '数量を足す', row: '行を指定' };
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -382,7 +382,7 @@
     if (!st.master || !st.model) return null;
     var s = st.sel, o = st.master.output || {};
     return UA.plan(st.model, { area: curAreaName(), areaRow: s.newArea ? null : s.areaRow, newArea: s.newArea, noArea: s.noArea && !s.newArea, sys: s.sys, place: s.place, spec: s.spec, item: s.item, lines: buildLines(),
-      elbow: s.item === 'pipe' && st.ui.elbowOn, elbowRate: o.elbowRate || 0.35, elbowLabel: o.elbowLabel || 'エルボ', totals: !!o.makeTotals,
+      elbow: s.item === 'pipe' && st.ui.elbowOn, elbowRate: o.elbowRate, elbowLabel: o.elbowLabel || 'エルボ', totals: !!o.makeTotals,
       how: st.ui.how, atRow: st.ui.atRow }, st.master);
   }
   function saveUi() { save(K_UI, { how: st.ui.how === 'row' ? (st.ui.howSaved || 'add') : st.ui.how, elbowOn: st.ui.elbowOn }); }
@@ -769,7 +769,7 @@
           return chip('sub', x.id, x.label + (n ? '（' + n + '）' : ''), x.id === s.sub, x.tip ? ' title="' + esc(x.tip) + '"' : '');
         }).join('') + '</div></div>';
     }
-    var rate = (st.master.output && st.master.output.elbowRate) || 0.35;
+    var rate = (st.master.output && st.master.output.elbowRate) || '（設定マスタの率）';
     var elb = s.item === 'pipe' ? '<div class="elb"><button type="button" class="chip elbtn' + (st.ui.elbowOn ? ' on' : '') + '" data-act="elbow" aria-pressed="' + st.ui.elbowOn + '">' + (st.ui.elbowOn ? '✓ ' : '＋ ') + 'エルボ 1式</button>' +
       '<span class="hint">J列＝直管の金額の合計×' + rate + '（10円単位で切り上げ）。同じ塊に既にあれば、範囲だけ直します</span></div>' : '';
     return '<section class="st">' + stepHead('03', '品目', 'D列・E列', true) + '<div class="tiles">' + tiles + '</div>' + sub + elb + '</section>';
@@ -944,8 +944,8 @@
           '<button type="button" class="x" tabindex="-1" data-act="vdel" data-v="' + esc(v.key) + '" aria-label="外す">×</button></div>');
       });
       h.push('</div>');
-      var lt = (st.master.output && st.master.output.valveThick) || [25, 50];
-      h.push('<div class="hint">数量（G列）は空欄で登録します。内訳に直接入力してください。保温厚は同じ施工箇所・仕様の配管（直管）の保温厚から（' + lt.map(function (x, i) { return (i ? '' : '') + x + 'mm以下→' + x; }).join('、') + '）。</div>');
+      var lt = (st.master.output && st.master.output.valveThick) || [];
+      h.push('<div class="hint">数量（G列）は空欄で登録します。内訳に直接入力してください。保温厚は同じ施工箇所・仕様の配管（直管）の保温厚から' + (lt.length ? '（' + lt.map(function (x) { return x + 'mm以下→' + x; }).join('、') + '）' : '') + '。</div>');
     } else h.push('<div class="empty">種類を押してからサイズを押して追加（数量は入れません）</div>');
     return '<section class="st">' + stepHead('05', '種類・サイズ', 'D・E・F・H・I列', list.length > 0) + h.join('') + '</section>';
   }
