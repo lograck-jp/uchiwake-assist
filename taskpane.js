@@ -11,7 +11,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.20';
+  var VERSION = '2.0.21';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -29,7 +29,7 @@
     cond: { on: {}, edit: {}, extra: [], editing: null, newText: '' },
     ui: { menu: false, busy: false, toast: null, composing: false, specEditMode: false, specEdit: null, showHidden: false, newSpec: '', newCat: '', newPlace: 'here',
       specIdx: [], showAll: false, full: true, discount: '', hover: '', ruleEdit: null, anim: '' },
-    undo: null, api19: false, api17: false, autoOpen: false
+    undo: null, api19: false, api17: false, autoOpen: false, tpl: null
   };
   function freshWiz() {
     return { open: 'item', item: '', place: '', spec: '', cont: false, d: '', done: null, insN: '',
@@ -167,13 +167,38 @@
     return Excel.run(function (ctx) {
       var ws = ctx.workbook.worksheets.getItem(target);
       var ur = ws.getUsedRange(false); ur.load('rowIndex,rowCount');
+      var fmt = ctx.workbook.worksheets.getItemOrNullObject(FMT_SHEET); fmt.load('name');
       return ctx.sync().then(function () {
         var last = Math.min(Math.max(ur.rowIndex + ur.rowCount, startRowOf() + 1), 6000);
         var rg = ws.getRange('A1:M' + last); rg.load('values,formulas');
-        return ctx.sync().then(function () { setGrid(rg.values, rg.formulas, last); attachEvents(target); });
+        fmtExists = !fmt.isNullObject;
+        var tw = fmtExists ? readTplRow(fmt, FMT_ROW) : null;
+        return ctx.sync().then(function () {
+          setGrid(rg.values, rg.formulas, last);
+          attachEvents(target);
+          if (tw) { setTpl(tw, FMT_ROW); return; }
+          // 内訳(FMT) が無いブック：このシートの下のほうの、何も入っていない行（初めの書式のまま）
+          var br = blankTemplateRow();
+          if (!br) { st.tpl = null; return; }
+          var tw2 = readTplRow(ws, br);
+          return ctx.sync().then(function () { setTpl(tw2, br); });
+        });
       });
     }).catch(function (e) { st.model = null; st.sc = null; st.modelErr = msg(e); });
   }
+  // 内訳の初めの行（文字位置・J列の金額式）を読む
+  function readTplRow(ws, r) {
+    var rg = ws.getRange('A' + r + ':J' + r); rg.load('formulas');
+    var cells = 'ABCDEFGHIJ'.split('').map(function (c) { var x = ws.getRange(c + r); x.format.load('horizontalAlignment'); return x; });
+    return { rg: rg, cells: cells };
+  }
+  function setTpl(tw, r) {
+    var jf = (tw.rg.formulas[0] || [])[9];
+    st.tpl = { row: r, align: tw.cells.map(function (c) { return c.format.horizontalAlignment || ''; }),
+      j: typeof jf === 'string' && jf.charAt(0) === '=' ? rowTpl(jf, r) : '' };
+  }
+  // 式の中の「その行」の参照（G5・I5 など。$ の付いた行は除く）を {行} にする
+  function rowTpl(f, r) { return f.replace(new RegExp('(^|[^A-Za-z0-9_$])(\\$?[A-Z]{1,3})' + r + '(?![0-9A-Za-z_(])', 'g'), '$1$2{行}'); }
   function setGrid(values, formulas, last) {
     st.grid = { v: values, f: formulas };
     st.last = last;
@@ -199,7 +224,8 @@
     var line = best(cnt.line) || dflt;
     return { line: line, blank: best(cnt.blank) || line };
   }
-  function jTpl(r) { var t = st.model && st.model.jTpl ? st.model.jTpl.line : ''; return t ? t.replace(/\{行\}/g, r) : ''; }
+  // J列の金額式：内訳の初めの行（内訳(FMT) の5行目など）の式をその行に合わせたもの。読めないときは、このシートでいちばん多い式
+  function jTpl(r) { var t = (st.tpl && st.tpl.j) || (st.model && st.model.jTpl ? st.model.jTpl.line : ''); return t ? t.replace(/\{行\}/g, r) : ''; }
 
   /* ---------- Excel のイベント（入力の監視・選択の追従） ---------- */
   var handlers = { sheet: null, changed: null, selection: null };
@@ -503,6 +529,13 @@
             if (rowH) ws.getRange(b.s + ':' + (b.s + b.n - 1)).format.rowHeight = rowH;
           });
         }
+        // 文字位置（左右）を内訳の初めの行にそろえる：挿入した行（Excel は上の行の書式を引き継ぐため。仕様の行は左、D列は中央など）と、
+        // 入力フォームで書く行（plan.resetRows）。このあと書くセルの文字位置（仕様は左など）はそのあとで付ける
+        var aRows = blocks.map(function (b) { return [b.s, b.s + b.n - 1]; });
+        if (plan.resetRows) aRows.push(plan.resetRows);
+        if (st.tpl && st.tpl.align) aRows.forEach(function (rr) {
+          'ABCDEFGHIJ'.split('').forEach(function (c, i) { var a = st.tpl.align[i]; if (a) ws.getRange(c + rr[0] + ':' + c + rr[1]).format.horizontalAlignment = a; });
+        });
         plan.writes.forEach(function (w) {
           var c = ws.getRange(w.col + w.r);
           c.formulas = [[w.v == null ? '' : w.v]];
@@ -656,7 +689,7 @@
     var sel = w.item === 'rect' && !(U.num(w.rect.rq) > 0) ? 'G' + first : ex.lines.length ? 'D' + r : 'E' + p.inputRow;
     var t = (p.ins ? p.ins + '行挿入して、' : '') + (p.gap ? p.P + '行目を空き行にして、' : '') + (p.writeSpec ? p.specRow + '行目に仕様の行を書きました。' : '');
     t += ex.lines.length ? first + (r - 1 > first ? '〜' + (r - 1) : '') + '行目に明細を書きました' + (w.item === 'rect' && !(U.num(w.rect.rq) > 0) ? '。数量（㎡）は G' + first + ' に入れてください' : '') : 'E' + p.inputRow + ' からサイズを打つと、保温厚・単位・単価が自動で入ります';
-    applyPlan({ ins: p.ins ? { at: p.insAt, n: p.ins } : null, writes: writes, select: sel }, t).then(function (ok) {
+    applyPlan({ ins: p.ins ? { at: p.insAt, n: p.ins } : null, writes: writes, select: sel, resetRows: [p.P, p.P + p.k - 1] }, t).then(function (ok) {
       if (!ok) return;
       w.done = { row: p.specRow || p.P, input: p.inputRow, spec: p.writeSpec, lines: ex.lines.length };
       w.insN = '';
