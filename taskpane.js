@@ -11,7 +11,7 @@
 (function () {
   'use strict';
   var U = UA.util;
-  var VERSION = '2.0.22';
+  var VERSION = '2.0.23';
   var K_MASTER = 'uchiwake-assist.master.v1', K_SK = 'uchiwake-assist.sekisan.v1', K_SPECS = 'uchiwake-assist.speclocal.v1',
     K_UI = 'uchiwake-assist.ui.v2', K_BOX = 'uchiwake-assist.boxui.v1', K_RULES = 'uchiwake-assist.calcrules.v1', K_EXP = 'uchiwake-assist.expense.v1';
   var REF_HEAD = { y: '単価の参照元（保温積算資料）', z: '参照した仕様', aa: '参照したサイズ', ab: '参照した厚み' };
@@ -229,7 +229,7 @@
 
   /* ---------- Excel のイベント（入力の監視・選択の追従） ---------- */
   var handlers = { sheet: null, changed: null, selection: null };
-  var changedTimer = null, selTimer = null, pending = { rows: {}, struct: false };
+  var changedTimer = null, selTimer = null, pending = { rows: {}, struct: false, dAlign: {} };
   var own = { until: 0, allUntil: 0, struct: 0, rows: {}, addrs: {} };   // 自分が書いた変更のイベントは無視する
   function attachEvents(target) {
     if (!st.api17 || handlers.sheet === target) return;
@@ -265,6 +265,8 @@
     var type = ev && ev.changeType;
     if (type && type !== 'RangeEdited') { pending.struct = true; st.auto.memo = {}; if (Date.now() > own.struct) st.undo = null; schedule(); return Promise.resolve(); }
     var a = parseAddr(ev && ev.address);
+    // D列に打った文字：上の明細の D列と同じ文字位置にする（下の alignD）
+    if (a && st.auto.on && a.c1 <= 4 && a.c2 >= 4 && a.r2 - a.r1 < 50) for (var rd = a.r1; rd <= a.r2; rd++) pending.dAlign[rd] = true;
     if (a && st.auto.on && st.master) {
       var hitsDE = a.c1 <= 5 && a.c2 >= 4, hitsF = a.c1 <= 6 && a.c2 >= 6;
       var rows = a.r2 - a.r1 + 1;
@@ -282,9 +284,49 @@
   function flushPending() {
     if (st.ui.busy) { schedule(); return; }
     var rows = Object.keys(pending.rows).map(Number).sort(function (a, b) { return a - b; });
-    pending.rows = {}; pending.struct = false;
-    if (rows.length && st.auto.on) fillRows(rows, 'auto').then(render);
-    else loadModel().then(renderSoft);
+    var dRows = Object.keys(pending.dAlign).map(Number).sort(function (a, b) { return a - b; });
+    pending.rows = {}; pending.struct = false; pending.dAlign = {};
+    var pre = dRows.length && st.auto.on ? alignD(dRows) : Promise.resolve();
+    pre.then(function () {
+      if (rows.length && st.auto.on) fillRows(rows, 'auto').then(render);
+      else loadModel().then(renderSoft);
+    });
+  }
+  // D列に文字を打った行：E列が空の行に当たるまで上へさかのぼり、D列に文字がある行の文字位置（左右・上下）だけを写す。
+  // 見つからなければそのまま。いっしょに打った行（貼り付けなど）は上の行から順に、写したあとの文字位置を使う
+  function alignD(rows) {
+    var target = st.target, top = startRowOf();
+    if (!target) return Promise.resolve();
+    return Excel.run(function (ctx) {
+      var ws = ctx.workbook.worksheets.getItem(target);
+      var lo = Math.max(top, rows[0] - 300), hi = rows[rows.length - 1];
+      var rg = ws.getRange('D' + lo + ':E' + hi); rg.load('values');
+      return ctx.sync().then(function () {
+        function cell(r, c) { var row = rg.values[r - lo]; return row ? row[c] : ''; }
+        var pairs = [];
+        rows.forEach(function (r) {
+          if (r < top || U.isEmpty(cell(r, 0))) return;
+          for (var q = r - 1; q >= lo; q--) {
+            if (U.isEmpty(cell(q, 1))) break;
+            if (!U.isEmpty(cell(q, 0))) { pairs.push({ r: r, src: q }); break; }
+          }
+        });
+        if (!pairs.length) return null;
+        var srcs = {};
+        pairs.forEach(function (p) { if (!srcs[p.src]) { srcs[p.src] = ws.getRange('D' + p.src); srcs[p.src].format.load('horizontalAlignment,verticalAlignment'); } });
+        return ctx.sync().then(function () {
+          var got = {};
+          pairs.forEach(function (p) {
+            var s = got[p.src] || { h: srcs[p.src].format.horizontalAlignment, v: srcs[p.src].format.verticalAlignment };
+            var t = ws.getRange('D' + p.r);
+            if (s.h) t.format.horizontalAlignment = s.h;
+            if (s.v) t.format.verticalAlignment = s.v;
+            got[p.r] = s;
+          });
+          return ctx.sync();
+        });
+      });
+    }).catch(function () { /* noop */ });
   }
   function readSelection() {
     if (!st.target) return Promise.resolve();
