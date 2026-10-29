@@ -153,6 +153,12 @@
       var s = normSpec(pick(r, '仕様'));
       var f = thickKey(pick(r, '標準の保温厚'));
       if (!s || !f) return;
+      // 仕様に * ? を使った行・サイズの範囲（サイズ以上・サイズ以下）がある行は「決まり」（例 *筒* の 15〜80A は 20mm）
+      var lo = pick(r, 'サイズ以上'), hi = pick(r, 'サイズ以下');
+      if (/[*?]/.test(s) || !isEmpty(lo) || !isEmpty(hi)) {
+        (m.thickRules = m.thickRules || []).push({ kind: str(pick(r, '仕様区分')), pat: s, min: isEmpty(lo) ? null : num(lo), max: isEmpty(hi) ? null : num(hi), f: f });
+        return;
+      }
       m.thick.push({ kind: str(pick(r, '仕様区分')), spec: s, size: sizeKey(pick(r, 'サイズ')), f: f });
     });
 
@@ -1663,15 +1669,49 @@
         }
       }
     }
-    // 5) 設定マスタの標準厚（サイズ別 → 全サイズ）
+    // 5) 設定マスタの標準厚の決まり（仕様のパターンとサイズの範囲。例 *筒* の 15〜80A は 20mm）。
+    //    この見積書の中に手がかりが無いときに使う（下の M_標準厚 の仕様ごとの厚みより先）
+    var tr = UA.thickRule(m, kind, x.spec, sz, x.d);
+    if (tr) return { f: thickKey(tr.f), from: '標準厚の決まり（M_標準厚・' + tr.label + '）' };
+    // 6) 設定マスタの標準厚（サイズ別 → 全サイズ）
     var t1 = m && m.thickIdx ? m.thickIdx[kind + '|' + (x.spec || '') + '|' + sk] : null;
     if (t1) return { f: thickKey(t1), from: '標準厚（M_標準厚・' + sizeLabel(item, sz) + '）' };
     var t2 = m && m.thickIdx ? m.thickIdx[kind + '|' + (x.spec || '') + '|（全サイズ）'] : null;
     if (t2) return { f: thickKey(t2), from: '標準厚（M_標準厚）' };
-    // 6) 同じ塊のすぐ上の明細 → 既定
+    // 7) 同じ塊のすぐ上の明細 → 既定
     l = nearest(L, r, function (q) { return q.blockId === x.blockId && sameCls(q) && hasF(q); });
     if (l) return { f: fStr(l.F), from: '近くの行（' + l.r + '行目）と同じ' };
     return { f: DEFAULT_THICK[kind] || '25', from: '既定の厚み' };
+  };
+  // 配管のサイズ → 鋼管の呼び径（A）。Su（D列 SUS も）・VP は単価と同じ読み替え
+  function pipeA(m, sz, d) {
+    if (!sz || sz.n == null) return null;
+    if (sz.ser === 'Su' || /^SUS$/i.test(String(d || '').trim())) {
+      var su = (m && m.sizes && m.sizes.Su || []).filter(function (z) { return z.n === sz.n; })[0];
+      var ps = su && su.priceSize != null ? su.priceSize : (SU_DEFAULT.filter(function (x) { return x[0] === sz.n; })[0] || [])[1];
+      return ps == null ? null : ps;
+    }
+    if (sz.ser === 'VP') return UA.VP_TO_A[sz.n] || sz.n;
+    return sz.n;
+  }
+  // 標準厚の決まり（M_標準厚 の * ? の仕様・サイズ以上／以下の行）。上の行から順に、最初に当てはまったもの
+  var THICK_RE = {};
+  UA.thickRule = function (m, kind, spec, sz, d) {
+    var rules = m && m.thickRules;
+    if (!rules || !rules.length || !spec) return null;
+    var n = kind === 'pipe' || kind === 'valve' ? pipeA(m, sz, d) : (sz && sz.n != null ? sz.n : null), ns = nk(spec);
+    for (var i = 0; i < rules.length; i++) {
+      var t = rules[i];
+      if (t.kind && t.kind !== kind) continue;
+      var re = THICK_RE[t.pat] || (THICK_RE[t.pat] = likeRe(t.pat));
+      if (!re.test(ns)) continue;
+      var ranged = t.min != null || t.max != null;
+      if (ranged && n == null) continue;
+      if (t.min != null && n < t.min) continue;
+      if (t.max != null && n > t.max) continue;
+      return { f: t.f, label: t.pat + (ranged ? '・' + (t.min != null ? t.min : '') + '〜' + (t.max != null ? t.max : '') + (kind === 'pipe' ? 'A' : '') : '') };
+    }
+    return null;
   };
   function sizeLabel(item, sz) {
     if (!sz) return '';
